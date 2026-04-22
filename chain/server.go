@@ -2,30 +2,55 @@ package chain
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 
+	"github.com/Arkiv-Network/arkiv-storage-service/store"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // handler implements the arkiv_* JSON-RPC methods consumed by the Reth ExEx.
 // Exported methods are registered as arkiv_<camelCaseMethodName>.
 type handler struct {
-	log *slog.Logger
+	log   *slog.Logger
+	store *store.Store
 }
 
 func (h *handler) CommitChain(_ context.Context, req CommitChainRequest) error {
-	h.log.Info("commitChain", "blocks", len(req.Blocks))
+	for _, block := range req.Blocks {
+		stateRoot, err := h.store.ProcessBlock(block)
+		if err != nil {
+			return fmt.Errorf("process block %d: %w", block.Header.Number, err)
+		}
+		h.log.Info("commitChain", "block", block.Header.Number, "stateRoot", stateRoot)
+	}
 	return nil
 }
 
 func (h *handler) Revert(_ context.Context, req RevertRequest) error {
-	h.log.Info("revert", "blocks", len(req.Blocks))
+	for _, ref := range req.Blocks {
+		if err := h.store.RevertBlock(ref); err != nil {
+			return fmt.Errorf("revert block %d: %w", ref.Number, err)
+		}
+		h.log.Info("revert", "block", ref.Number)
+	}
 	return nil
 }
 
 func (h *handler) Reorg(_ context.Context, req ReorgRequest) error {
-	h.log.Info("reorg", "reverted", len(req.RevertedBlocks), "new", len(req.NewBlocks))
+	for _, ref := range req.RevertedBlocks {
+		if err := h.store.RevertBlock(ref); err != nil {
+			return fmt.Errorf("revert block %d: %w", ref.Number, err)
+		}
+	}
+	for _, block := range req.NewBlocks {
+		stateRoot, err := h.store.ProcessBlock(block)
+		if err != nil {
+			return fmt.Errorf("process block %d: %w", block.Header.Number, err)
+		}
+		h.log.Info("reorg: committed", "block", block.Header.Number, "stateRoot", stateRoot)
+	}
 	return nil
 }
 
@@ -35,9 +60,9 @@ type Server struct {
 	rpc *rpc.Server
 }
 
-func New(log *slog.Logger) (*Server, error) {
+func New(log *slog.Logger, store *store.Store) (*Server, error) {
 	srv := rpc.NewServer()
-	if err := srv.RegisterName("arkiv", &handler{log: log}); err != nil {
+	if err := srv.RegisterName("arkiv", &handler{log: log, store: store}); err != nil {
 		return nil, err
 	}
 	return &Server{rpc: srv}, nil
