@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Arkiv-Network/arkiv-storage-service/types"
 	"github.com/ethereum/go-ethereum/common"
@@ -17,13 +18,15 @@ type annotPair struct {
 }
 
 // builtinAnnotations returns the built-in annotation pairs for an entity.
+// Address and hash values are stored as lowercase hex so that the query
+// normaliser (which lowercases $owner/$creator/$key query values) can match them.
 func builtinAnnotations(e EntityRLP) []annotPair {
 	return []annotPair{
 		{"$all", "true"},
-		{"$creator", e.Creator.Hex()},
+		{"$creator", strings.ToLower(e.Creator.Hex())},
 		{"$createdAtBlock", numericVal(e.CreatedAtBlock)},
-		{"$owner", e.Owner.Hex()},
-		{"$key", e.Key.Hex()},
+		{"$owner", strings.ToLower(e.Owner.Hex())},
+		{"$key", strings.ToLower(e.Key.Hex())},
 		{"$expiration", numericVal(e.ExpiresAt)},
 		{"$contentType", e.ContentType},
 	}
@@ -271,11 +274,11 @@ func processChangeOwner(db ethdb.Database, sdb *state.StateDB, j *blockJournal, 
 	entityID := decodeUint64(idBytes)
 
 	// Update $owner bitmap: remove old owner, add new owner.
-	if err := bitmapRemove(db, sdb, j, "$owner", entity.Owner.Hex(), entityID); err != nil {
+	if err := bitmapRemove(db, sdb, j, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
 		return err
 	}
 	entity.Owner = op.NewOwner
-	if err := bitmapAdd(db, sdb, j, "$owner", entity.Owner.Hex(), entityID); err != nil {
+	if err := bitmapAdd(db, sdb, j, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
 		return err
 	}
 

@@ -9,14 +9,15 @@ import (
 // PebbleDB key prefixes. All mutable entries are journaled for reorg handling;
 // immutable entries (bm, pairs, root, parent) are never journaled or deleted.
 var (
-	prefixBitmap  = []byte("arkiv_bm")
-	prefixAnnot   = []byte("arkiv_annot")
-	prefixID      = []byte("arkiv_id")
-	prefixAddr    = []byte("arkiv_addr")
-	prefixPairs   = []byte("arkiv_pairs")
-	prefixRoot    = []byte("arkiv_root")
-	prefixParent  = []byte("arkiv_parent")
-	prefixJournal = []byte("arkiv_journal")
+	prefixBitmap      = []byte("arkiv_bm")
+	prefixAnnot       = []byte("arkiv_annot")
+	prefixID          = []byte("arkiv_id")
+	prefixAddr        = []byte("arkiv_addr")
+	prefixPairs       = []byte("arkiv_pairs")
+	prefixRoot        = []byte("arkiv_root")
+	prefixParent      = []byte("arkiv_parent")
+	prefixJournal     = []byte("arkiv_journal")
+	prefixBlockNumber = []byte("arkiv_blknum")
 
 	// headKey is a single fixed key storing the canonical head (number, hash, stateRoot).
 	headKey = []byte("arkiv_head")
@@ -68,6 +69,13 @@ func journalKey(blockNumber uint64, blockHash common.Hash, entryIndex uint32) []
 	var ib [4]byte
 	binary.BigEndian.PutUint32(ib[:], entryIndex)
 	return append(k, ib[:]...)
+}
+
+func blockNumberKey(number uint64) []byte {
+	k := append([]byte{}, prefixBlockNumber...)
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], number)
+	return append(k, b[:]...)
 }
 
 func journalPrefix(blockNumber uint64, blockHash common.Hash) []byte {

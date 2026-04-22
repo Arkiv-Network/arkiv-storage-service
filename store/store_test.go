@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Arkiv-Network/arkiv-storage-service/types"
@@ -166,7 +167,7 @@ func TestCreateEntity(t *testing.T) {
 	if bm := readBitmap(t, s, "$all", "true"); !bm.Contains(1) {
 		t.Error("$all bitmap does not contain entity ID 1")
 	}
-	if bm := readBitmap(t, s, "$owner", testOwner1.Hex()); !bm.Contains(1) {
+	if bm := readBitmap(t, s, "$owner", strings.ToLower(testOwner1.Hex())); !bm.Contains(1) {
 		t.Error("$owner bitmap does not contain entity ID 1")
 	}
 	if bm := readBitmap(t, s, "$contentType", "application/json"); !bm.Contains(1) {
@@ -324,11 +325,11 @@ func TestChangeOwner(t *testing.T) {
 	}
 
 	// Old $owner bucket no longer contains entity.
-	if bm := readBitmap(t, s, "$owner", testOwner1.Hex()); bm.Contains(1) {
+	if bm := readBitmap(t, s, "$owner", strings.ToLower(testOwner1.Hex())); bm.Contains(1) {
 		t.Error("old $owner bitmap still contains entity ID 1")
 	}
 	// New $owner bucket contains entity.
-	if bm := readBitmap(t, s, "$owner", testOwner2.Hex()); !bm.Contains(1) {
+	if bm := readBitmap(t, s, "$owner", strings.ToLower(testOwner2.Hex())); !bm.Contains(1) {
 		t.Error("new $owner bitmap does not contain entity ID 1")
 	}
 }

@@ -34,7 +34,7 @@ type Store struct {
 	headHash   common.Hash
 	headNumber uint64
 
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
 // New creates a Store backed by the provided database.
@@ -112,11 +112,14 @@ func (s *Store) ProcessBlock(block types.ArkivBlock) (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("persist journal: %w", err)
 	}
 
-	// Record blockHash → stateRoot and blockHash → parentHash for revert.
+	// Record blockHash → stateRoot, blockHash → parentHash, and blockNumber → blockHash.
 	if err := s.rawDB.Put(rootKey(block.Header.Hash), newRoot.Bytes()); err != nil {
 		return common.Hash{}, err
 	}
 	if err := s.rawDB.Put(parentKey(block.Header.Hash), block.Header.ParentHash.Bytes()); err != nil {
+		return common.Hash{}, err
+	}
+	if err := s.rawDB.Put(blockNumberKey(blockNumber), block.Header.Hash.Bytes()); err != nil {
 		return common.Hash{}, err
 	}
 
@@ -160,9 +163,10 @@ func (s *Store) RevertBlock(ref types.ArkivBlockRef) error {
 	}
 	parentHash := common.BytesToHash(parentHashBytes)
 
-	// Clean up the root and parent mappings for the reverted block.
+	// Clean up root, parent, and block-number mappings for the reverted block.
 	_ = s.rawDB.Delete(rootKey(ref.Hash))
 	_ = s.rawDB.Delete(parentKey(ref.Hash))
+	_ = s.rawDB.Delete(blockNumberKey(blockNumber))
 
 	// Restore the parent's state root (may be EmptyRootHash for the genesis parent).
 	var parentRoot common.Hash

@@ -53,6 +53,12 @@ func decodeEntity(data []byte) (EntityRLP, error) {
 	return e, rlp.DecodeBytes(data, &e)
 }
 
+// DecodeEntityRLP decodes a raw RLP-encoded entity blob into an EntityRLP.
+// Used by callers outside the store package (e.g. the query server).
+func DecodeEntityRLP(data []byte) (EntityRLP, error) {
+	return decodeEntity(data)
+}
+
 // deriveEntityKey computes keccak256(blockNumber || txSeq || opSeq).
 func deriveEntityKey(blockNumber uint64, txSeq, opSeq uint32) common.Hash {
 	var buf [16]byte

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -31,9 +32,9 @@ func TestBuiltinAnnotations(t *testing.T) {
 
 	want := map[string]string{
 		"$all":            "true",
-		"$creator":        creator.Hex(),
-		"$owner":          owner.Hex(),
-		"$key":            key.Hex(),
+		"$creator":        strings.ToLower(creator.Hex()),
+		"$owner":          strings.ToLower(owner.Hex()),
+		"$key":            strings.ToLower(key.Hex()),
 		"$contentType":    "image/png",
 		"$createdAtBlock": numericVal(42),
 		"$expiration":     numericVal(1000),
