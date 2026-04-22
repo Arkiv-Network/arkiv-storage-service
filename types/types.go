@@ -76,6 +76,16 @@ func (o *ArkivOperation) UnmarshalJSON(data []byte) error {
 }
 
 type CreateOp struct {
+	// TxSeq and OpSeq are the EntityRegistry's per-block transaction and
+	// per-transaction operation counters. Together with the block number they
+	// are the inputs to the entity key derivation:
+	//   key = keccak256(blockNumber || txSeq || opSeq)
+	//   address = key[:20]
+	//
+	// OPEN QUESTION: if EntityRLP.Key is dropped (see store/entityrlp.go), TxSeq
+	// and OpSeq can also be removed from CreateOp and the ExEx need only forward
+	// EntityAddress. This is a breaking change to the ExEx→EntityDB wire format
+	// requiring coordination with the ExEx component. See notes.md §4.
 	TxSeq         uint32         `json:"txSeq"`
 	OpSeq         uint32         `json:"opSeq"`
 	EntityAddress common.Address `json:"entityAddress"`

@@ -509,6 +509,8 @@ The full entity state — payload, owner, creator, expiry, creation block, conte
 
 `Creator` and `CreatedAtBlock` are in the RLP to support built-in annotations (`$creator`, `$createdAtBlock`) without extra storage slots. The full 32-byte `Key` is included so that callers with only the 20-byte `entity_address` can recover the complete key (and therefore the derivation inputs) — the last 12 bytes are not stored anywhere else.
 
+> **⚠ Open question — `Key` field and ExEx wire format.** If the query API never needs reverse-derivation (address → blockNumber/txSeq/opSeq), `Key` can be dropped from `EntityRLP`. Removing it would shrink every entity blob. It would also allow `TxSeq` and `OpSeq` to be dropped from `CreateOp` in the ExEx → EntityDB wire format, since the ExEx already emits `entity_address` directly from the contract log and the EntityDB would no longer need to re-derive the key from its inputs. **This is a breaking change to the JSON-RPC interface between the ExEx and the EntityDB** and requires explicit coordination with the ExEx component before it can be made. Do not remove `Key`, `TxSeq`, or `OpSeq` unilaterally. See `notes.md §4` and the comments in `store/entityrlp.go` and `types/types.go`.
+
 #### entity_id
 
 Each entity is assigned a `uint64` sequential ID at `Create` time, taken from the `entity_count` counter in the system account. The ID→address mapping is **trie-committed** via a system account storage slot (see System Account below), making it provable via `eth_getProof`. Two PebbleDB entries mirror the same information for fast access on the query hot path:
@@ -587,7 +589,9 @@ This index is never reverted — once a pair has existed, it is part of the perm
 "arkiv_id"     + uint64_id (8 bytes big-endian)         →  entity_address (20 bytes)      (fast cache; authoritative copy is system account trie slot)
 "arkiv_addr"   + entity_address (20 bytes)              →  uint64_id (8 bytes big-endian) (fast cache; tombstone left in place on Delete/Expire)
 "arkiv_pairs"  + annotKey + "\x00" + annotVal           →  \x01                           (append-only existence flag)
-"arkiv_root"   + blockHash (32 bytes)                   →  stateRoot (32 bytes)           (canonical head mapping)
+"arkiv_root"   + blockHash (32 bytes)                   →  stateRoot (32 bytes)           (per-block state root; written on ProcessBlock, deleted on RevertBlock)
+"arkiv_parent" + blockHash (32 bytes)                   →  parentHash (32 bytes)          (per-block parent pointer; written on ProcessBlock, deleted on RevertBlock)
+"arkiv_head"                                            →  blockNumber (8 bytes) + blockHash (32 bytes) + stateRoot (32 bytes)  (canonical head; overwritten on every ProcessBlock and RevertBlock)
 "arkiv_journal"+ blockNumber (8 bytes) + blockHash (32 bytes) + entry_index (4 bytes)     →  journal entry (see §4)
 ```
 
@@ -654,13 +658,18 @@ Re-encode the RLP with the updated field; call `SetCode` with the new bytes. Upd
 
 ### Block Commit and State Root
 
+> **⚠ Non-atomic writes.** The trie (TrieDB) and the mutable PebbleDB entries have no shared transaction boundary. Steps 1–6 below are performed sequentially, and a crash between any two steps leaves the two stores in an inconsistent state. The current behaviour on restart is to re-open at the last persisted `arkiv_head`, which was written last: if the crash occurred before step 5, `arkiv_head` still points to the previous block, the new trie root is orphaned, and the mutable PebbleDB entries are in the pre-block state — consistent with the old head. The block is silently dropped and the ExEx must re-deliver it. If the crash occurred after step 5 but mid-way through a later write, partial state may be visible. This should be hardened before production with a write-ahead log or equivalent recovery mechanism.
+
 After processing all operations for a block, the EntityDB:
 
 1. Calls `StateDB.Commit(blockNumber, true)` to flush trie changes and obtain the new `stateRoot`.
-2. Writes `"arkiv_root" + blockHash → stateRoot` to PebbleDB.
-3. Updates the in-memory canonical head pointer to the new block number, hash, and state root.
+2. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes to the underlying database. `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
+3. Persists the per-block journal for mutable PebbleDB entries.
+4. Writes `"arkiv_root" + blockHash → stateRoot` and `"arkiv_parent" + blockHash → parentHash` to PebbleDB.
+5. Writes `"arkiv_head" → blockNumber + blockHash + stateRoot` to PebbleDB, overwriting the previous canonical head record.
+6. Updates the in-memory canonical head pointer.
 
-The `TrieDB` is opened with `HashScheme` retaining state roots for all committed blocks. This enables historical trie lookups without a separate snapshot mechanism.
+On restart, `New()` reads `"arkiv_head"` to restore the canonical head. If the key is absent (fresh database) the store starts from an empty trie (`EmptyRootHash`).
 
 ---
 
@@ -693,6 +702,8 @@ Writes to immutable entries (`"arkiv_bm"`, `"arkiv_pairs"`, `"arkiv_root"`) are 
 
 ### Revert Procedure
 
+> **⚠ Non-atomic writes.** The journal batch and the `arkiv_head` update are separate writes with no shared transaction. A crash after the journal batch commits but before `arkiv_head` is updated leaves PebbleDB in the reverted state while the canonical head still points to the reverted block. On restart the store opens at the stale head, with the trie root still valid but the PebbleDB bitmap/ID state inconsistent with it. Recovery logic is needed to detect and resolve this. See §4 (Block Commit and State Root) for the same issue on the commit path.
+
 To revert a sequence of blocks (newest-first):
 
 For each block being reverted:
@@ -702,15 +713,18 @@ For each block being reverted:
    - If `OldValue` is nil, delete the key.
    - Otherwise, write `OldValue` back to the key.
 3. Delete the journal entries for this block.
-4. Delete `"arkiv_root" + blockHash`.
-
-After all blocks are reverted, update the canonical head pointer to the common ancestor block.
+4. Delete `"arkiv_root" + blockHash` and `"arkiv_parent" + blockHash`.
+5. Write the updated `"arkiv_head"` pointing to the parent block.
 
 The trie is already at the correct state (it retains all historical roots); only the mutable PebbleDB entries require explicit reversion.
 
 ### Journal Pruning
 
-Journal entries for blocks older than the finalization depth (typically 50,400 L2 blocks, corresponding to the 7-day Optimism challenge window) may be pruned. Once a block is finalized, it will never be reverted and its journal entries serve no purpose. The EntityDB runs a background goroutine that deletes journal entries for finalized blocks. The finalization depth is configurable.
+Once a block is finalized it can never be reverted, so its journal entries serve no purpose and can be deleted.
+
+**Pruning depth.** The EntityDB is an L3 built on OP Stack. A block is considered final once the corresponding L2 output root has been posted and the fault-proof challenge window has elapsed without a successful challenge. The challenge window is 7 days (configurable per OP Stack deployment). At a 2-second L3 block time this corresponds to approximately **302,400 L3 blocks** (7 × 24 × 3600 ÷ 2). Journal entries for blocks older than this depth are safe to delete. The depth is configurable; the default should be set conservatively at or above the deployed challenge window.
+
+**What is pruned.** Only `"arkiv_journal"` entries are deleted. Immutable entries (`"arkiv_bm"`, `"arkiv_pairs"`, `"c" + codeHash`) are never pruned — they are content-addressed and required for historical queries. `"arkiv_root"` and `"arkiv_parent"` entries are also retained indefinitely to support historical state root lookups.
 
 ---
 
@@ -908,7 +922,9 @@ PebbleDB (outside trie, same underlying database):
   "arkiv_id"      + uint64_id (8 bytes big-endian)         →  entity_address (20 bytes)
   "arkiv_addr"    + entity_address (20 bytes)              →  uint64_id (8 bytes big-endian)
   "arkiv_pairs"   + annotKey + "\x00" + annotVal           →  \x01                              (append-only existence index)
-  "arkiv_root"    + blockHash (32 bytes)                   →  stateRoot (32 bytes)
+  "arkiv_root"    + blockHash (32 bytes)                   →  stateRoot (32 bytes)              (per-block; deleted on RevertBlock)
+  "arkiv_parent"  + blockHash (32 bytes)                   →  parentHash (32 bytes)             (per-block parent pointer; deleted on RevertBlock)
+  "arkiv_head"                                             →  blockNumber + blockHash + stateRoot (72 bytes; canonical head, survives restart)
   "arkiv_journal" + blockNumber + blockHash + entryIndex   →  RLP(JournalEntry)                 (prunable after finalization)
 ```
 

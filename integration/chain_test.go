@@ -16,7 +16,7 @@ import (
 // newClient starts an in-process chain server and returns an RPC client connected to it.
 func newClient(t *testing.T) *rpc.Client {
 	t.Helper()
-	srv, err := chain.New(slog.Default(), store.New())
+	srv, err := chain.New(slog.Default(), store.NewMemory())
 	if err != nil {
 		t.Fatalf("chain.New: %v", err)
 	}
