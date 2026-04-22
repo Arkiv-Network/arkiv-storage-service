@@ -81,7 +81,7 @@ func revertBlockJournal(db ethdb.Database, blockNumber uint64, blockHash common.
 	// Replay in reverse order.
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i].entry
-		if e.OldValue == nil {
+		if len(e.OldValue) == 0 {
 			if err := batch.Delete(e.Key); err != nil {
 				return err
 			}
