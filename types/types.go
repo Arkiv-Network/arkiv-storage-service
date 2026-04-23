@@ -47,6 +47,43 @@ type ArkivOperation struct {
 	ChangeOwner *ChangeOwnerOp
 }
 
+func (o ArkivOperation) MarshalJSON() ([]byte, error) {
+	switch {
+	case o.Create != nil:
+		type T struct {
+			Type string `json:"type"`
+			*CreateOp
+		}
+		return json.Marshal(T{Type: "create", CreateOp: o.Create})
+	case o.Update != nil:
+		type T struct {
+			Type string `json:"type"`
+			*UpdateOp
+		}
+		return json.Marshal(T{Type: "update", UpdateOp: o.Update})
+	case o.Delete != nil:
+		type T struct {
+			Type string `json:"type"`
+			*DeleteOp
+		}
+		return json.Marshal(T{Type: "delete", DeleteOp: o.Delete})
+	case o.Extend != nil:
+		type T struct {
+			Type string `json:"type"`
+			*ExtendOp
+		}
+		return json.Marshal(T{Type: "extend", ExtendOp: o.Extend})
+	case o.ChangeOwner != nil:
+		type T struct {
+			Type string `json:"type"`
+			*ChangeOwnerOp
+		}
+		return json.Marshal(T{Type: "changeOwner", ChangeOwnerOp: o.ChangeOwner})
+	default:
+		return nil, fmt.Errorf("ArkivOperation: no operation set")
+	}
+}
+
 func (o *ArkivOperation) UnmarshalJSON(data []byte) error {
 	var typed struct {
 		Type string `json:"type"`
