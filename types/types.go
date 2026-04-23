@@ -76,45 +76,37 @@ func (o *ArkivOperation) UnmarshalJSON(data []byte) error {
 }
 
 type CreateOp struct {
-	// TxSeq and OpSeq are the EntityRegistry's per-block transaction and
-	// per-transaction operation counters. Together with the block number they
-	// are the inputs to the entity key derivation:
-	//   key = keccak256(blockNumber || txSeq || opSeq)
-	//   address = key[:20]
-	//
-	// OPEN QUESTION: if EntityRLP.Key is dropped (see store/entityrlp.go), TxSeq
-	// and OpSeq can also be removed from CreateOp and the ExEx need only forward
-	// EntityAddress. This is a breaking change to the ExEx→EntityDB wire format
-	// requiring coordination with the ExEx component. See notes.md §4.
-	TxSeq         uint32         `json:"txSeq"`
-	OpSeq         uint32         `json:"opSeq"`
-	EntityAddress common.Address `json:"entityAddress"`
-	Sender        common.Address `json:"sender"`
-	Payload       hexutil.Bytes  `json:"payload"`
-	ContentType   string         `json:"contentType"`
-	ExpiresAt     uint64         `json:"expiresAt"`
-	Owner         common.Address `json:"owner"`
-	Annotations   []Annotation   `json:"annotations"`
+	// EntityKey is the 32-byte key minted by the EntityRegistry contract:
+	//   keccak256(chainId || registry || owner || nonce)
+	// Forwarded directly from the EntityOperation log by the ExEx.
+	// The trie account address is derived as EntityKey[:20].
+	EntityKey   common.Hash    `json:"entityKey"`
+	Sender      common.Address `json:"sender"`
+	Payload     hexutil.Bytes  `json:"payload"`
+	ContentType string         `json:"contentType"`
+	ExpiresAt   uint64         `json:"expiresAt"`
+	Owner       common.Address `json:"owner"`
+	Annotations []Annotation   `json:"annotations"`
 }
 
 type UpdateOp struct {
-	EntityAddress common.Address `json:"entityAddress"`
-	Payload       hexutil.Bytes  `json:"payload"`
-	ContentType   string         `json:"contentType"`
-	ExpiresAt     uint64         `json:"expiresAt"`
-	Annotations   []Annotation   `json:"annotations"`
+	EntityKey   common.Hash   `json:"entityKey"`
+	Payload     hexutil.Bytes `json:"payload"`
+	ContentType string        `json:"contentType"`
+	ExpiresAt   uint64        `json:"expiresAt"`
+	Annotations []Annotation  `json:"annotations"`
 }
 
 type DeleteOp struct {
-	EntityAddress common.Address `json:"entityAddress"`
+	EntityKey common.Hash `json:"entityKey"`
 }
 
 type ExtendOp struct {
-	EntityAddress common.Address `json:"entityAddress"`
-	NewExpiresAt  uint64         `json:"newExpiresAt"`
+	EntityKey    common.Hash `json:"entityKey"`
+	NewExpiresAt uint64      `json:"newExpiresAt"`
 }
 
 type ChangeOwnerOp struct {
-	EntityAddress common.Address `json:"entityAddress"`
-	NewOwner      common.Address `json:"newOwner"`
+	EntityKey common.Hash    `json:"entityKey"`
+	NewOwner  common.Address `json:"newOwner"`
 }

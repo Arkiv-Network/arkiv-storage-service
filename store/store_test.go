@@ -15,8 +15,11 @@ import (
 
 // Fixed addresses and hashes used across store tests.
 var (
-	testAddr1  = common.HexToAddress("0x1111111111111111111111111111111111111111")
-	testAddr2  = common.HexToAddress("0x2222222222222222222222222222222222222222")
+	// testKey1/2: 32-byte entity keys whose first 20 bytes match testAddr1/2.
+	testKey1   = common.HexToHash("0x1111111111111111111111111111111111111111000000000000000000000000")
+	testKey2   = common.HexToHash("0x2222222222222222222222222222222222222222000000000000000000000000")
+	testAddr1  = common.Address(testKey1[:20])
+	testAddr2  = common.Address(testKey2[:20])
 	testSender = common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	testOwner1 = common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 	testOwner2 = common.HexToAddress("0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
@@ -37,17 +40,15 @@ func makeBlock(number uint64, hash, parentHash common.Hash, ops ...types.ArkivOp
 }
 
 // makeCreate builds a simple create operation with no user annotations.
-func makeCreate(addr, sender, owner common.Address, payload, contentType string, expiresAt uint64, txSeq, opSeq uint32) types.ArkivOperation {
+func makeCreate(entityKey common.Hash, sender, owner common.Address, payload, contentType string, expiresAt uint64) types.ArkivOperation {
 	return types.ArkivOperation{
 		Create: &types.CreateOp{
-			TxSeq:         txSeq,
-			OpSeq:         opSeq,
-			EntityAddress: addr,
-			Sender:        sender,
-			Payload:       hexutil.Bytes(payload),
-			ContentType:   contentType,
-			ExpiresAt:     expiresAt,
-			Owner:         owner,
+			EntityKey:   entityKey,
+			Sender:      sender,
+			Payload:     hexutil.Bytes(payload),
+			ContentType: contentType,
+			ExpiresAt:   expiresAt,
+			Owner:       owner,
 		},
 	}
 }
@@ -106,7 +107,7 @@ func TestCreateEntity(t *testing.T) {
 	s := NewMemory()
 
 	block := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, `{"msg":"hello"}`, "application/json", 1000, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, `{"msg":"hello"}`, "application/json", 1000),
 	)
 	if _, err := s.ProcessBlock(block); err != nil {
 		t.Fatalf("ProcessBlock: %v", err)
@@ -141,10 +142,9 @@ func TestCreateEntity(t *testing.T) {
 		t.Errorf("ContentType = %q, want %q", e.ContentType, "application/json")
 	}
 
-	// Key is derived from (blockNumber=1, txSeq=1, opSeq=1).
-	expectedKey := deriveEntityKey(1, 1, 1)
-	if e.Key != expectedKey {
-		t.Errorf("Key = %s, want %s", e.Key, expectedKey)
+	// Key is the contract's entityKey forwarded by the ExEx.
+	if e.Key != testKey1 {
+		t.Errorf("Key = %s, want %s", e.Key, testKey1)
 	}
 
 	// PebbleDB ID/addr mappings are written.
@@ -181,9 +181,12 @@ func TestUpdateEntity(t *testing.T) {
 	strVal := "note"
 	block1 := makeBlock(1, testHash1, common.Hash{},
 		types.ArkivOperation{Create: &types.CreateOp{
-			TxSeq: 1, OpSeq: 1, EntityAddress: testAddr1,
-			Sender: testSender, Payload: hexutil.Bytes("original"),
-			ContentType: "text/plain", ExpiresAt: 500, Owner: testOwner1,
+			EntityKey:   testKey1,
+			Sender:      testSender,
+			Payload:     hexutil.Bytes("original"),
+			ContentType: "text/plain",
+			ExpiresAt:   500,
+			Owner:       testOwner1,
 			Annotations: []types.Annotation{{Key: "type", StringValue: &strVal}},
 		}},
 	)
@@ -194,11 +197,11 @@ func TestUpdateEntity(t *testing.T) {
 	newStrVal := "doc"
 	block2 := makeBlock(2, testHash2, testHash1,
 		types.ArkivOperation{Update: &types.UpdateOp{
-			EntityAddress: testAddr1,
-			Payload:       hexutil.Bytes("updated"),
-			ContentType:   "text/plain",
-			ExpiresAt:     600,
-			Annotations:   []types.Annotation{{Key: "type", StringValue: &newStrVal}},
+			EntityKey:   testKey1,
+			Payload:     hexutil.Bytes("updated"),
+			ContentType: "text/plain",
+			ExpiresAt:   600,
+			Annotations: []types.Annotation{{Key: "type", StringValue: &newStrVal}},
 		}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
@@ -238,14 +241,14 @@ func TestDeleteEntity(t *testing.T) {
 	s := NewMemory()
 
 	block1 := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, "payload", "text/plain", 999, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, "payload", "text/plain", 999),
 	)
 	if _, err := s.ProcessBlock(block1); err != nil {
 		t.Fatalf("ProcessBlock create: %v", err)
 	}
 
 	block2 := makeBlock(2, testHash2, testHash1,
-		types.ArkivOperation{Delete: &types.DeleteOp{EntityAddress: testAddr1}},
+		types.ArkivOperation{Delete: &types.DeleteOp{EntityKey: testKey1}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
 		t.Fatalf("ProcessBlock delete: %v", err)
@@ -274,14 +277,14 @@ func TestExtend(t *testing.T) {
 	s := NewMemory()
 
 	block1 := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, "p", "text/plain", 100, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, "p", "text/plain", 100),
 	)
 	if _, err := s.ProcessBlock(block1); err != nil {
 		t.Fatalf("ProcessBlock create: %v", err)
 	}
 
 	block2 := makeBlock(2, testHash2, testHash1,
-		types.ArkivOperation{Extend: &types.ExtendOp{EntityAddress: testAddr1, NewExpiresAt: 200}},
+		types.ArkivOperation{Extend: &types.ExtendOp{EntityKey: testKey1, NewExpiresAt: 200}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
 		t.Fatalf("ProcessBlock extend: %v", err)
@@ -306,14 +309,14 @@ func TestChangeOwner(t *testing.T) {
 	s := NewMemory()
 
 	block1 := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, "p", "text/plain", 100, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, "p", "text/plain", 100),
 	)
 	if _, err := s.ProcessBlock(block1); err != nil {
 		t.Fatalf("ProcessBlock create: %v", err)
 	}
 
 	block2 := makeBlock(2, testHash2, testHash1,
-		types.ArkivOperation{ChangeOwner: &types.ChangeOwnerOp{EntityAddress: testAddr1, NewOwner: testOwner2}},
+		types.ArkivOperation{ChangeOwner: &types.ChangeOwnerOp{EntityKey: testKey1, NewOwner: testOwner2}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
 		t.Fatalf("ProcessBlock changeOwner: %v", err)
@@ -339,7 +342,7 @@ func TestHeadPersistence(t *testing.T) {
 	s1 := New(db)
 
 	block := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, "p", "text/plain", 100, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, "p", "text/plain", 100),
 	)
 	root, err := s1.ProcessBlock(block)
 	if err != nil {
@@ -363,7 +366,7 @@ func TestRevertBlock(t *testing.T) {
 	s := NewMemory()
 
 	block1 := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, "p", "text/plain", 100, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, "p", "text/plain", 100),
 	)
 	if _, err := s.ProcessBlock(block1); err != nil {
 		t.Fatalf("ProcessBlock: %v", err)
@@ -412,7 +415,7 @@ func TestReorgTwoBlocks(t *testing.T) {
 
 	// Block 1: create entity A (ID 1).
 	block1 := makeBlock(1, testHash1, common.Hash{},
-		makeCreate(testAddr1, testSender, testOwner1, "a", "text/plain", 100, 1, 1),
+		makeCreate(testKey1, testSender, testOwner1, "a", "text/plain", 100),
 	)
 	if _, err := s.ProcessBlock(block1); err != nil {
 		t.Fatalf("ProcessBlock 1: %v", err)
@@ -420,7 +423,7 @@ func TestReorgTwoBlocks(t *testing.T) {
 
 	// Block 2: create entity B (ID 2).
 	block2 := makeBlock(2, testHash2, testHash1,
-		makeCreate(testAddr2, testSender, testOwner1, "b", "text/plain", 200, 1, 1),
+		makeCreate(testKey2, testSender, testOwner1, "b", "text/plain", 200),
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
 		t.Fatalf("ProcessBlock 2: %v", err)

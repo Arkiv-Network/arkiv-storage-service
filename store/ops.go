@@ -60,33 +60,33 @@ func annotPairSet(pairs []annotPair) map[annotPair]struct{} {
 
 // processCreate applies a Create operation.
 func processCreate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.CreateOp, blockNumber uint64) error {
+	// Entity address is the first 20 bytes of the contract's entityKey.
+	addr := common.Address(op.EntityKey[:20])
+
 	// 1. Assign entity ID.
 	entityID := incrementEntityCount(sdb)
 
-	// 2. Derive entity key.
-	entityKey := deriveEntityKey(blockNumber, op.TxSeq, op.OpSeq)
+	// 2. Create account in the trie.
+	sdb.CreateAccount(addr)
 
-	// 3. Create account in the trie.
-	sdb.CreateAccount(op.EntityAddress)
+	// 3. Write ID→address trie slot (trie-committed; reverts automatically on reorg).
+	setIDSlot(sdb, entityID, addr)
 
-	// 4. Write ID→address trie slot (trie-committed; reverts automatically on reorg).
-	setIDSlot(sdb, entityID, op.EntityAddress)
-
-	// 5. Write PebbleDB ID/addr mappings and journal them (mutable; explicit revert).
+	// 4. Write PebbleDB ID/addr mappings and journal them (mutable; explicit revert).
 	idK := idKey(entityID)
-	addrK := addrKey(op.EntityAddress)
+	addrK := addrKey(addr)
 	oldID, _ := db.Get(idK)
 	oldAddr, _ := db.Get(addrK)
 	j.record(idK, oldID)
 	j.record(addrK, oldAddr)
-	if err := db.Put(idK, op.EntityAddress.Bytes()); err != nil {
+	if err := db.Put(idK, addr.Bytes()); err != nil {
 		return err
 	}
 	if err := db.Put(addrK, encodeUint64(entityID)); err != nil {
 		return err
 	}
 
-	// 6. Build EntityRLP.
+	// 5. Build EntityRLP.
 	entity := EntityRLP{
 		Payload:        []byte(op.Payload),
 		Owner:          op.Owner,
@@ -94,7 +94,7 @@ func processCreate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 		ExpiresAt:      op.ExpiresAt,
 		CreatedAtBlock: blockNumber,
 		ContentType:    op.ContentType,
-		Key:            entityKey,
+		Key:            op.EntityKey,
 	}
 	for _, a := range op.Annotations {
 		if a.StringValue != nil {
@@ -104,27 +104,28 @@ func processCreate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 		}
 	}
 
-	// 7. Write annotation bitmaps.
+	// 6. Write annotation bitmaps.
 	for _, pair := range allAnnotations(entity) {
 		if err := bitmapAdd(db, sdb, j, pair.key, pair.val, entityID); err != nil {
 			return fmt.Errorf("bitmap add %q: %w", pair.key, err)
 		}
 	}
 
-	// 8. Encode entity and set as account code.
+	// 7. Encode entity and set as account code.
 	data, _, err := encodeEntity(entity)
 	if err != nil {
 		return err
 	}
-	sdb.SetCode(op.EntityAddress, data, tracing.CodeChangeUnspecified)
+	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }
 
 // processUpdate applies an Update operation.
 func processUpdate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.UpdateOp) error {
-	code := sdb.GetCode(op.EntityAddress)
+	addr := common.Address(op.EntityKey[:20])
+	code := sdb.GetCode(addr)
 	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", op.EntityAddress)
+		return fmt.Errorf("entity %s not found", addr)
 	}
 	old, err := decodeEntity(code)
 	if err != nil {
@@ -132,7 +133,7 @@ func processUpdate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 	}
 
 	// Resolve entity ID for bitmap operations.
-	addrK := addrKey(op.EntityAddress)
+	addrK := addrKey(addr)
 	idBytes, err := db.Get(addrK)
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
@@ -180,13 +181,13 @@ func processUpdate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 	if err != nil {
 		return err
 	}
-	sdb.SetCode(op.EntityAddress, data, tracing.CodeChangeUnspecified)
+	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }
 
 // processDelete applies a Delete operation.
 func processDelete(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.DeleteOp) error {
-	return deleteEntity(db, sdb, j, op.EntityAddress)
+	return deleteEntity(db, sdb, j, common.Address(op.EntityKey[:20]))
 }
 
 func deleteEntity(db ethdb.Database, sdb *state.StateDB, j *blockJournal, addr common.Address) error {
@@ -224,16 +225,17 @@ func deleteEntity(db ethdb.Database, sdb *state.StateDB, j *blockJournal, addr c
 
 // processExtend applies an Extend operation.
 func processExtend(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.ExtendOp) error {
-	code := sdb.GetCode(op.EntityAddress)
+	addr := common.Address(op.EntityKey[:20])
+	code := sdb.GetCode(addr)
 	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", op.EntityAddress)
+		return fmt.Errorf("entity %s not found", addr)
 	}
 	entity, err := decodeEntity(code)
 	if err != nil {
 		return fmt.Errorf("decode entity: %w", err)
 	}
 
-	idBytes, err := db.Get(addrKey(op.EntityAddress))
+	idBytes, err := db.Get(addrKey(addr))
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
 	}
@@ -252,22 +254,23 @@ func processExtend(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 	if err != nil {
 		return err
 	}
-	sdb.SetCode(op.EntityAddress, data, tracing.CodeChangeUnspecified)
+	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }
 
 // processChangeOwner applies a ChangeOwner operation.
 func processChangeOwner(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.ChangeOwnerOp) error {
-	code := sdb.GetCode(op.EntityAddress)
+	addr := common.Address(op.EntityKey[:20])
+	code := sdb.GetCode(addr)
 	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", op.EntityAddress)
+		return fmt.Errorf("entity %s not found", addr)
 	}
 	entity, err := decodeEntity(code)
 	if err != nil {
 		return fmt.Errorf("decode entity: %w", err)
 	}
 
-	idBytes, err := db.Get(addrKey(op.EntityAddress))
+	idBytes, err := db.Get(addrKey(addr))
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
 	}
@@ -286,6 +289,6 @@ func processChangeOwner(db ethdb.Database, sdb *state.StateDB, j *blockJournal, 
 	if err != nil {
 		return err
 	}
-	sdb.SetCode(op.EntityAddress, data, tracing.CodeChangeUnspecified)
+	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }

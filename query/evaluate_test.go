@@ -11,11 +11,12 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
-// Fixed addresses used in query evaluate tests.
+// Fixed entity keys and addresses used in query evaluate tests.
+// eKeyN[:20] == eAddrN, so the entity address is derived from the key.
 var (
-	eAddr1 = common.HexToAddress("0x1111111111111111111111111111111111111111")
-	eAddr2 = common.HexToAddress("0x2222222222222222222222222222222222222222")
-	eAddr3 = common.HexToAddress("0x3333333333333333333333333333333333333333")
+	eKey1 = common.HexToHash("0x1111111111111111111111111111111111111111000000000000000000000000")
+	eKey2 = common.HexToHash("0x2222222222222222222222222222222222222222000000000000000000000000")
+	eKey3 = common.HexToHash("0x3333333333333333333333333333333333333333000000000000000000000000")
 
 	qOwner1 = common.HexToAddress("0xaaaa000000000000000000000000000000000001")
 	qOwner2 = common.HexToAddress("0xaaaa000000000000000000000000000000000002")
@@ -36,18 +37,16 @@ func makeQBlock(number uint64, hash, parent common.Hash, ops ...types.ArkivOpera
 	}
 }
 
-func makeQCreate(addr, sender, owner common.Address, contentType string, expiresAt uint64, txSeq, opSeq uint32, annots ...types.Annotation) types.ArkivOperation {
+func makeQCreate(entityKey common.Hash, sender, owner common.Address, contentType string, expiresAt uint64, annots ...types.Annotation) types.ArkivOperation {
 	return types.ArkivOperation{
 		Create: &types.CreateOp{
-			TxSeq:         txSeq,
-			OpSeq:         opSeq,
-			EntityAddress: addr,
-			Sender:        sender,
-			Payload:       hexutil.Bytes("payload"),
-			ContentType:   contentType,
-			ExpiresAt:     expiresAt,
-			Owner:         owner,
-			Annotations:   annots,
+			EntityKey:   entityKey,
+			Sender:      sender,
+			Payload:     hexutil.Bytes("payload"),
+			ContentType: contentType,
+			ExpiresAt:   expiresAt,
+			Owner:       owner,
+			Annotations: annots,
 		},
 	}
 }
@@ -105,8 +104,8 @@ func numAnnot(key string, val uint64) types.Annotation {
 func TestEvaluateAll(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner2, "text/plain", 200, 1, 2),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner2, "text/plain", 200),
 	))
 	assertIDs(t, evaluate(t, s, "*"), []uint64{1, 2})
 	assertIDs(t, evaluate(t, s, "$all"), []uint64{1, 2})
@@ -116,8 +115,8 @@ func TestEvaluateAll(t *testing.T) {
 func TestEvaluateEquality(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner2, "text/html", 200, 1, 2),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner2, "text/html", 200),
 	))
 	assertIDs(t, evaluate(t, s, `$owner = `+qOwner1.Hex()), []uint64{1})
 	assertIDs(t, evaluate(t, s, `$owner = `+qOwner2.Hex()), []uint64{2})
@@ -128,9 +127,9 @@ func TestEvaluateEquality(t *testing.T) {
 func TestEvaluateEqualityNot(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner2, "text/plain", 200, 1, 2),
-		makeQCreate(eAddr3, qSender, qOwner2, "text/plain", 300, 1, 3),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner2, "text/plain", 200),
+		makeQCreate(eKey3, qSender, qOwner2, "text/plain", 300),
 	))
 	// entities 2 and 3 belong to owner2; owner1 != owner2 → only entity 1
 	assertIDs(t, evaluate(t, s, `$owner != `+qOwner2.Hex()), []uint64{1})
@@ -140,9 +139,9 @@ func TestEvaluateEqualityNot(t *testing.T) {
 func TestEvaluateAnd(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner2, "text/plain", 200, 1, 2),
-		makeQCreate(eAddr3, qSender, qOwner1, "text/html", 300, 1, 3),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner2, "text/plain", 200),
+		makeQCreate(eKey3, qSender, qOwner1, "text/html", 300),
 	))
 	// owner1 AND text/plain → only entity 1
 	q := `$owner = ` + qOwner1.Hex() + ` && $contentType = "text/plain"`
@@ -153,9 +152,9 @@ func TestEvaluateAnd(t *testing.T) {
 func TestEvaluateOr(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner2, "text/html", 200, 1, 2),
-		makeQCreate(eAddr3, qSender, qOwner2, "text/xml", 300, 1, 3),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner2, "text/html", 200),
+		makeQCreate(eKey3, qSender, qOwner2, "text/xml", 300),
 	))
 	q := `$owner = ` + qOwner1.Hex() + ` || $owner = ` + qOwner2.Hex()
 	assertIDs(t, evaluate(t, s, q), []uint64{1, 2, 3})
@@ -165,9 +164,9 @@ func TestEvaluateOr(t *testing.T) {
 func TestEvaluateNumericRange(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner1, "text/plain", 200, 1, 2),
-		makeQCreate(eAddr3, qSender, qOwner1, "text/plain", 300, 1, 3),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner1, "text/plain", 200),
+		makeQCreate(eKey3, qSender, qOwner1, "text/plain", 300),
 	))
 	assertIDs(t, evaluate(t, s, `$expiration > 100`), []uint64{2, 3})
 	assertIDs(t, evaluate(t, s, `$expiration < 300`), []uint64{1, 2})
@@ -179,7 +178,7 @@ func TestEvaluateNumericRange(t *testing.T) {
 func TestEvaluateNumericRangeEdge(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 0, 1, 1),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 0),
 	))
 	assertIDs(t, evaluate(t, s, `$expiration < 0`), []uint64{})
 	assertIDs(t, evaluate(t, s, `$expiration >= 0`), []uint64{1})
@@ -189,9 +188,9 @@ func TestEvaluateNumericRangeEdge(t *testing.T) {
 func TestEvaluateUserAnnotation(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1, strAnnot("type", "document")),
-		makeQCreate(eAddr2, qSender, qOwner1, "text/plain", 200, 1, 2, strAnnot("type", "image")),
-		makeQCreate(eAddr3, qSender, qOwner1, "text/plain", 300, 1, 3, numAnnot("score", 42)),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100, strAnnot("type", "document")),
+		makeQCreate(eKey2, qSender, qOwner1, "text/plain", 200, strAnnot("type", "image")),
+		makeQCreate(eKey3, qSender, qOwner1, "text/plain", 300, numAnnot("score", 42)),
 	))
 	assertIDs(t, evaluate(t, s, `type = "document"`), []uint64{1})
 	assertIDs(t, evaluate(t, s, `type = "image"`), []uint64{2})
@@ -202,9 +201,9 @@ func TestEvaluateUserAnnotation(t *testing.T) {
 func TestEvaluateInclusion(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
-		makeQCreate(eAddr2, qSender, qOwner2, "text/plain", 200, 1, 2),
-		makeQCreate(eAddr3, qSender, qOwner2, "text/html", 300, 1, 3),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
+		makeQCreate(eKey2, qSender, qOwner2, "text/plain", 200),
+		makeQCreate(eKey3, qSender, qOwner2, "text/html", 300),
 	))
 	qIn := `$owner in (` + qOwner1.Hex() + ` ` + qOwner2.Hex() + `)`
 	assertIDs(t, evaluate(t, s, qIn), []uint64{1, 2, 3})
@@ -217,9 +216,9 @@ func TestEvaluateInclusion(t *testing.T) {
 func TestEvaluateGlobPrefix(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1, strAnnot("mime", "text/plain")),
-		makeQCreate(eAddr2, qSender, qOwner1, "text/html", 200, 1, 2, strAnnot("mime", "text/html")),
-		makeQCreate(eAddr3, qSender, qOwner1, "image/png", 300, 1, 3, strAnnot("mime", "image/png")),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100, strAnnot("mime", "text/plain")),
+		makeQCreate(eKey2, qSender, qOwner1, "text/html", 200, strAnnot("mime", "text/html")),
+		makeQCreate(eKey3, qSender, qOwner1, "image/png", 300, strAnnot("mime", "image/png")),
 	))
 	assertIDs(t, evaluate(t, s, `mime ~ "text/*"`), []uint64{1, 2})
 	assertIDs(t, evaluate(t, s, `mime ~ "image/*"`), []uint64{3})
@@ -230,11 +229,11 @@ func TestEvaluateAtBlock(t *testing.T) {
 	s := store.NewMemory()
 	// Block 1: entity 1 only.
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eAddr1, qSender, qOwner1, "text/plain", 100, 1, 1),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100),
 	))
 	// Block 2: entity 2 added.
 	mustProcess(t, s, makeQBlock(2, qHash2, qHash1,
-		makeQCreate(eAddr2, qSender, qOwner1, "text/plain", 200, 1, 1),
+		makeQCreate(eKey2, qSender, qOwner1, "text/plain", 200),
 	))
 
 	assertIDs(t, evaluateAt(t, s, "*", 1), []uint64{1})
