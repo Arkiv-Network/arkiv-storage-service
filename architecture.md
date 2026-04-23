@@ -60,7 +60,9 @@
 
 ---
 
-> **⚠ Work in progress.** The mechanism by which `arkiv_stateRoot` is fed back from the EntityDB to the `EntityRegistry` contract is not fully designed. Specifically: whether the ExEx→EntityDB JSON-RPC call should be synchronous or asynchronous, how the resulting state root is submitted to the contract without impacting L3 block production, and whether the submission transaction requires gossip are all open questions. This affects the verifiability model described throughout this document. Read §2 (arkiv_stateRoot Storage) for the known open points.
+> **Design decision.** The EntityDB does not currently submit `arkiv_stateRoot` to the `EntityRegistry` contract. The EntityDB and op-reth run as separate, independent processes. The EntityDB computes a state root internally after each block, but that root is not anchored on-chain. This will remain the case until the EntityDB has demonstrated sufficient determinism — expected to be around one year of production operation. On-chain commitment and the full verifiability proof chain described in §2 are planned for a future phase.
+>
+> In the current phase, **partial verification** is available: the `EntityRegistry` contract stores a `coreHash` commitment for every live entity (§2), which clients can use to verify that the payload and attributes returned by the EntityDB are authentic. Query result completeness (i.e. that the result set contains all matching entities) cannot be verified in the current phase.
 
 ---
 
@@ -70,23 +72,22 @@ This document describes the Arkiv EntityDB architecture, composed of three compo
 
 Arkiv databases are L3s. The Reth node, the `EntityRegistry` contract, and the ExEx all run on the L3. The L3 settles against an L2 (OP Stack), which in turn settles against Ethereum L1.
 
-All Arkiv mutations flow through the `EntityRegistry` contract. The contract validates each operation and emits logs that the ExEx parses and forwards to the Go EntityDB. After the EntityDB processes each block it produces `arkiv_stateRoot` — the root of its internal entity state trie. The ExEx submits this root back to the `EntityRegistry` contract, where it is stored per block in contract storage and committed in the main chain's `stateRoot` at the next block. This is the verifiability anchor.
+All Arkiv mutations flow through the `EntityRegistry` contract. The contract validates each operation and emits logs that the ExEx parses and forwards to the Go EntityDB. After the EntityDB processes each block it computes `arkiv_stateRoot` — the root of its internal entity state trie — but does not currently submit it on-chain. The EntityDB and the op-reth node run as separate, independent processes.
 
-The Go EntityDB maintains a private query index — a Merkle Patricia Trie and PebbleDB annotation bitmaps — optimised for fast entity lookup and SQL-like queries. Although the trie is private (not the main Reth world state), its root is anchored on-chain, enabling a two-level proof chain:
+The Go EntityDB maintains a private query index — a Merkle Patricia Trie and PebbleDB annotation bitmaps — optimised for fast entity lookup and SQL-like queries. The trie root is computed per block and retained internally to support historical queries, but is not currently anchored to the main chain's `stateRoot`.
 
-1. EntityDB provides a Merkle proof of entity payload against `arkiv_stateRoot` at block N (entity trie proof).
-2. Reth provides a Merkle proof of `arkiv_stateRoot` against the L3 `stateRoot` at block N+1 (anchor proof via contract storage).
+A future phase will anchor `arkiv_stateRoot` on-chain via the `EntityRegistry` contract, enabling a two-level verifiability proof chain (see §2). That phase is deferred until the EntityDB has demonstrated sufficient determinism in production.
 
 **What this design provides:**
-- Verifiable entity payloads: two-level Merkle proof chain anchored in the main chain's `stateRoot`
 - On-chain validation of all Arkiv operations via the `EntityRegistry` contract
+- Per-entity payload verification: clients can recompute `coreHash` from entity data returned by the EntityDB and compare it against the `coreHash` stored in `EntityRegistry._commitments` at any block (see §2)
 - Fast SQL-like queries (latest and historical) via the Go EntityDB query index
-- Clean reorg handling without full state replay — no special reorg logic needed for the `arkiv_stateRoot` commitment
-- No modification to Reth required — the ExEx is a read-only observer
+- Clean reorg handling without full state replay
+- No modification to op-reth required — the ExEx is a read-only observer
 
-**What this design does not provide:**
-- Query completeness proofs for range or glob queries (the annotation key space is not enumerable from on-chain state)
-- Zero-lag verifiability — `arkiv_stateRoot` for block N is committed at block N+1
+**What this design does not provide (current phase):**
+- Query result completeness proofs — there is no on-chain commitment to annotation bitmaps, so a node could return an incomplete result set without detection
+- Verifiability of range or glob query results for the same reason
 
 ---
 
@@ -107,16 +108,13 @@ SDK / clients
 │  │  EntityRegistry (smart contract, on L3)                   │   │
 │  │  - Validates Arkiv operations                             │   │
 │  │  - Emits logs consumed by ExEx                            │   │
-│  │  - Stores arkiv_stateRoot[N] submitted by ExEx            │   │
 │  │  - Committed in L3 stateRoot on every block               │   │
 │  └──────────────────────────────────────────────────────────┘   │
-│                    ▲ arkiv_stateRoot[N]                          │
-│                    │ (tx submitted by ExEx after block N)        │
-│  ┌─────────────────┴────────────────────────────────────────┐   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Arkiv ExEx                                               │   │
 │  │  - Watches sealed blocks for EntityRegistry calls         │   │
 │  │  - Parses logs, forwards ops to Go EntityDB               │   │
-│  │  - Submits arkiv_stateRoot returned by EntityDB           │   │
 │  └─────────────────────────────────┬────────────────────────┘   │
 └────────────────────────────────────│────────────────────────────┘
                                      │ HTTP JSON-RPC
@@ -147,12 +145,11 @@ SDK / clients
 
 1. A client submits a standard L3 transaction calling `EntityRegistry.execute(Op[] ops)`. The contract validates each operation and emits a log per operation. The resulting storage changes are committed in the L3 block's `stateRoot` when the block is sealed.
 2. Reth commits the sealed block. The ExEx receives a `ChainCommitted { chain }` notification.
-3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `txSeq`, `opSeq`, and `entity_address` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `operations` list.
-4. The ExEx calls `arkiv_commitChain` on the Go EntityDB and receives `arkiv_stateRoot` in the response — the root of the EntityDB's trie after applying block N. *(Open: whether this call is synchronous and whether waiting for it delays ExEx completion, which could affect block production, is not yet resolved — see §2.)*
-5. The ExEx submits a transaction to `EntityRegistry.setArkivStateRoot(blockN, arkiv_stateRoot)`, targeting block N+1. *(Open: the submission mechanism — whether this goes through the normal mempool and gossip, or is a privileged direct injection — is not yet designed.)*
-6. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
+3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `entityKey` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `operations` list.
+4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block and computes `arkiv_stateRoot` internally, but does not return it to the ExEx and the ExEx does not submit it anywhere.
+5. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
 
-On `ChainReverted`, the ExEx sends `arkiv_revert` with block identifiers only. The EntityDB replays its journal in reverse. The `arkiv_stateRoot` commitments for the reverted blocks are also reverted automatically — they live in contract storage, which reverts with the chain. On `ChainReorged`, the ExEx sends `arkiv_reorg` atomically, then submits fresh `arkiv_stateRoot` values for the new chain.
+On `ChainReverted`, the ExEx sends `arkiv_revert` with block identifiers only. The EntityDB replays its journal in reverse. On `ChainReorged`, the ExEx sends `arkiv_reorg` atomically.
 
 ---
 
@@ -165,38 +162,66 @@ The `EntityRegistry` is a smart contract deployed on the L3. It is the single on
 - Validates each operation (ownership checks, expiry, correct caller)
 - Dispatches to per-operation logic (`_create`, `_update`, `_extend`, `_transfer`, `_delete`, `_expire`)
 - Emits a log per operation, consumed by the ExEx to drive the EntityDB
-- Stores `arkiv_stateRoot` per block, submitted by the ExEx after it processes each block
 
-The internal changeset hash mechanism (see `experiments/change-set-hash-v3.md`) is also maintained by the contract and provides an independent audit trail of all mutations, but it is not the primary verifiability mechanism in this design.
+The internal changeset hash mechanism (see `experiments/change-set-hash-v3.md`) is also maintained by the contract and provides an independent audit trail of all mutations.
 
-### arkiv_stateRoot Storage
+### arkiv_stateRoot Storage (future)
 
-> **⚠ This section describes the intended design. Several aspects are unresolved.**
+> **Deferred.** On-chain commitment of `arkiv_stateRoot` is not implemented in the current phase. The EntityDB computes the state root internally after each block but does not submit it to the contract. This section describes the intended future design for reference.
 
-After the EntityDB processes block N it returns `arkiv_stateRoot_N`. The ExEx then submits a transaction calling:
+When on-chain commitment is enabled, after the EntityDB processes block N the ExEx will submit a transaction calling:
 
 ```solidity
 function setArkivStateRoot(uint64 blockNumber, bytes32 stateRoot) external onlyExEx;
 ```
 
-The contract stores this in a mapping committed in the L3's world state:
+The contract will store this in a mapping committed in the L3's world state:
 
 ```solidity
 mapping(uint64 => bytes32) public arkivStateRoots;
 // arkivStateRoots[N] = arkiv_stateRoot_N, stored at block N+1
 ```
 
-**Open questions:**
+Open design questions for that phase: synchrony of the ExEx→EntityDB call relative to block production; transaction submission mechanism (mempool vs. direct sequencer injection); and missed-submission recovery strategy.
 
-- **Synchrony.** The ExEx currently calls `arkiv_commitChain` synchronously and blocks until the EntityDB returns `arkiv_stateRoot`. Depending on how long the EntityDB takes to apply a block, this may delay the ExEx from emitting `FinishedHeight`, potentially creating backpressure on block production. An asynchronous model (ExEx fires-and-forgets, EntityDB pushes the root later) avoids this but complicates sequencing.
+### Verification (current)
 
-- **Transaction submission.** Once the ExEx has `arkiv_stateRoot_N`, it needs to get it into block N+1 as a contract call. The straightforward path is submitting a signed transaction through the normal mempool. Whether this transaction needs to be gossiped across the L3 network, or can be injected directly (as a system transaction by the sequencer), depends on the L3 sequencer design and has not been decided.
+The `EntityRegistry` stores a `Commitment` for every live entity:
 
-- **Missed submission.** If the submission transaction is not included in block N+1 (e.g., due to gas, nonce issues, or sequencer censorship), `arkivStateRoots[N]` will be absent or stale. The retry and recovery strategy is not yet defined.
+```solidity
+struct Commitment {
+    address creator;       // immutable
+    BlockNumber createdAt; // immutable
+    BlockNumber updatedAt; // updated on every mutation
+    BlockNumber expiresAt; // updated on extend
+    address owner;         // updated on transfer
+    bytes32 coreHash;      // EIP-712 hash of: entityKey, creator, createdAt, contentType, payload, attributes
+}
+```
 
-### Verification
+`coreHash` is the key field. It commits to the full immutable content of the entity — payload, contentType, and attributes — via an EIP-712 structured hash. `entityHash` (emitted in every `EntityOperation` event) wraps `coreHash` with the mutable fields:
 
-The two-level proof chain works as follows for a client that wants to verify entity payload P at block N:
+```
+coreHash   = EIP-712.hashStruct(CoreHash(entityKey, creator, createdAt, contentType, payload, attributes))
+entityHash = EIP-712.hashStruct(EntityHash(coreHash, owner, updatedAt, expiresAt))
+```
+
+**Per-entity verification procedure.** To verify that entity data returned by the EntityDB at block B is authentic:
+
+1. Retrieve the entity from the EntityDB at block B (payload, contentType, attributes, creator, createdAt, owner, updatedAt, expiresAt, entityKey).
+2. Recompute `coreHash` using the EIP-712 formula above.
+3. Call `EntityRegistry.commitment(entityKey)` at block B via `eth_call` (or `eth_getProof` for a cryptographic proof). Read the stored `coreHash`.
+4. Assert the two `coreHash` values are equal.
+
+Both the EntityDB (via its internal HashScheme trie) and the EVM state trie (via the chain's archive) are queryable at any historical block, so this procedure works identically for current and historical entity state. If an entity was deleted at block B+N, querying both at block B will find it in both, and the coreHash comparison holds.
+
+**What this does not cover.** This is a per-entity verification only. The `EntityRegistry` has no on-chain commitment to the annotation bitmap index, so a client cannot verify that a query result contains *all* matching entities — only that each individual entity in the result is authentic.
+
+### Verification (future)
+
+> **Deferred.** Full query-level verifiability depends on on-chain `arkiv_stateRoot` commitment, which is not active in the current phase.
+
+The intended two-level proof chain for a client verifying entity payload P at block N:
 
 **Step 1 — entity proof (EntityDB trie → arkiv_stateRoot).**
 `arkiv_getProof(entityAddress, blockN)` returns a Merkle proof from `arkiv_stateRoot_N` to the entity's account node, proving `codeHash = keccak256(RLP(entity))`. The client fetches the RLP bytes and verifies `keccak256(RLP(entity)) == codeHash` to confirm the payload.
@@ -205,8 +230,6 @@ The two-level proof chain works as follows for a client that wants to verify ent
 `eth_getProof(ENTITY_REGISTRY_ADDRESS, [slot(arkivStateRoots[N])], blockHash_{N+1})` proves that `arkivStateRoots[N] = arkiv_stateRoot_N` against the L3 `stateRoot` at block N+1. The L3 `stateRoot` is covered by the OP Stack fault proof system and anchored to L2 and ultimately L1.
 
 Combining both steps: the payload is bound to `codeHash`, `codeHash` is in the entity account committed under `arkiv_stateRoot_N`, and `arkiv_stateRoot_N` is committed in the L3 world state at block N+1.
-
-**Reorg safety.** `arkivStateRoots[N]` lives in contract storage and reverts with the chain if block N+1 is reorged out. The EntityDB journal independently reverts block N's effects. No special reorg handling is required for the commitment — both sides converge automatically.
 
 ---
 
@@ -233,7 +256,7 @@ The ExEx does not forward full blocks. For each block in the chain it:
 1. Reads the sealed header to extract the three fields the EntityDB needs: `number`, `hash`, `parent_hash`.
 2. Zips transactions (with senders) against their receipts.
 3. Filters to transactions where `tx.to == ENTITY_REGISTRY_ADDRESS` and `receipt.status == 1`. Failed calls are discarded — the contract reverted and no state changes were applied, so the EntityDB must not apply them either.
-4. For each passing transaction, reads the logs emitted by the contract to extract the typed operation list. Each log includes the contract's internal `txSeq` and `opSeq` counters (the same counters driving the V3 changeset hash) and the derived `entity_address`. These are used as-emitted — the ExEx does not recompute them from calldata positions.
+4. For each passing transaction, reads the logs emitted by the contract to extract the typed operation list. Each `EntityOperation` log includes the `entityKey` (the 32-byte `keccak256(chainId || registry || owner || nonce)` value minted by the contract). The EntityDB derives the trie account address as `entityKey[:20]`. The ExEx does not recompute keys locally.
 5. Passes `expires_at` through as a block number directly from the contract log — no timestamp conversion is needed. The EntityDB housekeeping process works in block numbers.
 
 If a block contains no Arkiv transactions it is still forwarded as an `ArkivBlock` with an empty `operations` list. The EntityDB must advance its state root for every block in the canonical chain, even empty ones, so that block-number-to-state-root mappings remain complete.
@@ -292,43 +315,39 @@ pub enum ArkivOperation {
 
 #[derive(Serialize)]
 pub struct CreateOp {
-    pub tx_seq:       u32,       // EntityRegistry's per-block transaction sequence counter
-    pub op_seq:       u32,       // EntityRegistry's per-transaction operation sequence counter
+    pub entity_key:   B256,      // keccak256(chainId || registry || owner || nonce) — from EntityOperation log
     pub sender:       Address,   // becomes Creator in EntityRLP
     pub payload:      Bytes,
     pub content_type: String,
     pub expires_at:   u64,       // block number, passed through directly from contract log
     pub owner:        Address,
     pub annotations:  Vec<Annotation>,
-    // entity_address is also emitted in the contract log and can be included here
-    // for convenience, but is fully derivable as keccak256(blockNumber || tx_seq || op_seq)[:20]
-    pub entity_address: Address,
 }
 
 #[derive(Serialize)]
 pub struct UpdateOp {
-    pub entity_address: Address,
-    pub payload:        Bytes,
-    pub content_type:   String,
-    pub expires_at:     u64,     // block number
-    pub annotations:    Vec<Annotation>,
+    pub entity_key:  B256,
+    pub payload:     Bytes,
+    pub content_type: String,
+    pub expires_at:  u64,        // block number
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Serialize)]
 pub struct DeleteOp {
-    pub entity_address: Address,
+    pub entity_key: B256,
 }
 
 #[derive(Serialize)]
 pub struct ExtendOp {
-    pub entity_address: Address,
+    pub entity_key:    B256,
     pub new_expires_at: u64,     // block number
 }
 
 #[derive(Serialize)]
 pub struct ChangeOwnerOp {
-    pub entity_address: Address,
-    pub new_owner:      Address,
+    pub entity_key: B256,
+    pub new_owner:  Address,
 }
 
 #[derive(Serialize)]
@@ -359,15 +378,13 @@ Apply a contiguous sequence of `ArkivBlock`s to the canonical head. Blocks must 
         },
         "operations": [
           {
-            "type":          "create",
-            "txSeq":         1,
-            "opSeq":         1,
-            "entityAddress": "0x...",
-            "sender":        "0x...",
-            "payload":       "0x...",
-            "contentType":   "application/json",
-            "expiresAt":     13500,
-            "owner":         "0x...",
+            "type":        "create",
+            "entityKey":   "0x1234...abcd",
+            "sender":      "0x...",
+            "payload":     "0x...",
+            "contentType": "application/json",
+            "expiresAt":   13500,
+            "owner":       "0x...",
             "annotations": [
               { "key": "type",     "stringValue":  "note" },
               { "key": "priority", "numericValue": 5      }
@@ -449,7 +466,7 @@ It does not import or start any Ethereum node infrastructure: no P2P, no transac
 
 The Go EntityDB is a query engine. Its private trie and PebbleDB bitmaps exist to serve fast entity lookups and SQL-like annotation queries. It performs no validation — all validation is handled by the `EntityRegistry` contract before operations reach the EntityDB. The EntityDB blindly applies whatever the ExEx forwards.
 
-`arkiv_stateRoot` — the root of the EntityDB's trie after each block — is submitted to the `EntityRegistry` contract by the ExEx and stored in the L3 world state (§2). This anchors the EntityDB's trie to the main chain, enabling the two-level proof chain described in the abstract. The L3 `stateRoot` covers the contract storage slot holding `arkiv_stateRoot`, which is what clients verify against; the EntityDB trie itself is private and not directly covered.
+`arkiv_stateRoot` — the root of the EntityDB's trie after each block — is computed and retained internally but is not currently submitted on-chain (see the design decision note and §2).
 
 **Immutable vs mutable state.** Two distinct kinds of state live in the EntityDB:
 
@@ -460,16 +477,14 @@ The Go EntityDB is a query engine. Its private trie and PebbleDB bitmaps exist t
 
 #### Address Derivation
 
-Each entity has a dedicated Ethereum account. The account address is the first 20 bytes of the entity key:
+Each entity has a dedicated Ethereum account. The `entityKey` is minted by the `EntityRegistry` contract and emitted in the `EntityOperation` log. The trie account address is the first 20 bytes of that key:
 
 ```
-entity_key     = keccak256(blockNumber || txSeq || opSeq)   // 32 bytes
-entity_address = entity_key[:20]                            // 20 bytes — account address in the trie
+entity_key     = keccak256(chainId || registry || owner || nonce)   // 32 bytes — from EntityOperation log
+entity_address = entity_key[:20]                                     // 20 bytes — account address in the trie
 ```
 
-`txSeq` is the `EntityRegistry` contract's internal transaction sequence counter for the current block; `opSeq` is the per-operation counter within that transaction. Both are emitted in the contract log that the ExEx reads — they are the same counters that drive the V3 changeset hash (see `experiments/change-set-hash-v3.md`). `blockNumber` is the L3 block number.
-
-This derivation is chosen because all three inputs are **computable inside the EVM**: `block.number` is a standard opcode, and `txSeq`/`opSeq` are the contract's own counters maintained in storage. An earlier design used `keccak256(txHash || opIndex)`, but `tx.hash` is not accessible in the EVM — there is no opcode for it — so the contract could not verify or emit the derived entity address. With the current scheme the contract can compute and log `entity_address` at creation time, so clients and the ExEx always have the authoritative address from the receipt without needing to re-derive it.
+The key is derived from the owner's address and a per-owner monotonic nonce, bound to the chain and registry contract address to prevent cross-chain and cross-deployment collisions. The ExEx reads `entityKey` directly from the `EntityOperation` log and forwards it to the EntityDB; no local recomputation is needed.
 
 The payload is intentionally excluded from the derivation: the entity address is a pure identity anchor; content commitment is handled by `codeHash`.
 
@@ -499,7 +514,7 @@ type EntityRLP struct {
     ExpiresAt          uint64
     CreatedAtBlock     uint64
     ContentType        string
-    Key                common.Hash          // full 32-byte key = keccak256(blockNumber || txSeq || opSeq)
+    Key                common.Hash          // full 32-byte entityKey = keccak256(chainId || registry || owner || nonce)
     StringAnnotations  []StringAnnotationRLP
     NumericAnnotations []NumericAnnotationRLP
 }
@@ -507,9 +522,7 @@ type EntityRLP struct {
 
 The full entity state — payload, owner, creator, expiry, creation block, content type, the full 32-byte key, and all annotations — is in one RLP blob stored as the account's code field. Fetching the code bytes and verifying `keccak256(bytes) == codeHash` confirms the payload against the trie.
 
-`Creator` and `CreatedAtBlock` are in the RLP to support built-in annotations (`$creator`, `$createdAtBlock`) without extra storage slots. The full 32-byte `Key` is included so that callers with only the 20-byte `entity_address` can recover the complete key (and therefore the derivation inputs) — the last 12 bytes are not stored anywhere else.
-
-> **⚠ Open question — `Key` field and ExEx wire format.** If the query API never needs reverse-derivation (address → blockNumber/txSeq/opSeq), `Key` can be dropped from `EntityRLP`. Removing it would shrink every entity blob. It would also allow `TxSeq` and `OpSeq` to be dropped from `CreateOp` in the ExEx → EntityDB wire format, since the ExEx already emits `entity_address` directly from the contract log and the EntityDB would no longer need to re-derive the key from its inputs. **This is a breaking change to the JSON-RPC interface between the ExEx and the EntityDB** and requires explicit coordination with the ExEx component before it can be made. Do not remove `Key`, `TxSeq`, or `OpSeq` unilaterally. See `notes.md §4` and the comments in `store/entityrlp.go` and `types/types.go`.
+`Creator` and `CreatedAtBlock` are in the RLP to support built-in annotations (`$creator`, `$createdAtBlock`) without extra storage slots. The full 32-byte `Key` is the contract's `entityKey` — it is stored here so that the query API can return it to clients, who need it to call `EntityRegistry.commitment(entityKey)` for payload verification (§2). The last 12 bytes are not recoverable from the 20-byte `entity_address` alone.
 
 #### entity_id
 
@@ -809,11 +822,11 @@ The `"arkiv_pairs"` index is a superset of the pairs that existed at any given b
 
 Historical range and glob queries are therefore correct but may perform more trie reads than the equivalent latest-state query. The overhead is proportional to the number of pairs in `"arkiv_pairs"` that match the prefix scan.
 
-### Query Completeness Proofs
+### Query Completeness Proofs (future)
 
-For equality queries, a client can verify that the query result is complete and unmodified without trusting the node operator.
+> **Deferred.** Query completeness proofs depend on `arkiv_stateRoot` being anchored on-chain, which is not active in the current phase. In the current phase, clients can verify individual entity payloads via the `EntityRegistry` `coreHash` commitment (§2), but cannot verify that a query result contains *all* matching entities.
 
-For an equality query on `(annotKey, annotVal)` at block `B`:
+When `arkiv_stateRoot` is anchored on-chain, equality query completeness becomes verifiable. For an equality query on `(annotKey, annotVal)` at block `B`:
 
 ```
 1. eth_getProof(systemAccount, [slot[keccak256("annot" || annotKey || "\x00" || annotVal)]], blockHash_B)
@@ -826,13 +839,11 @@ For an equality query on `(annotKey, annotVal)` at block `B`:
    from the entity account (itself verifiable via eth_getProof on the entity account at blockHash_B).
 ```
 
-Steps 1–3 are a single multi-slot `eth_getProof` call against the system account. The bitmap and the ID→address mappings are both committed in `arkiv_stateRoot`, so the entire query result — which entities match, and what their addresses are — is verifiable without trusting the EntityDB.
-
 For a multi-condition equality query, the client fetches one bitmap proof per term (step 1–2 for each), intersects the bitmaps locally, and then performs a single step-3 proof for the IDs in the intersection.
 
 ### No Completeness Guarantee for Range / Glob
 
-Because range and glob queries enumerate bitmap hashes from `"arkiv_pairs"` (a PebbleDB structure outside the trie), a node can omit entries from the prefix scan without producing an incorrect `stateRoot`. The individual bitmap hashes are trie-committed and verifiable per pair, but the set of pairs matching a prefix is not. Clients requiring completeness guarantees should restrict their queries to equality predicates, or trust the node operator for range and glob results.
+Range and glob queries have no completeness guarantee, even in the future phase when `arkiv_stateRoot` is anchored on-chain. These queries enumerate bitmap hashes from `"arkiv_pairs"` — a PebbleDB structure outside the trie — so a node can omit entries from the prefix scan without producing an incorrect `stateRoot`. The individual bitmap hashes are trie-committed and verifiable per pair, but the set of pairs matching a prefix is not. Clients requiring completeness guarantees must restrict their queries to equality predicates.
 
 ---
 
@@ -939,6 +950,8 @@ PebbleDB (outside trie, same underlying database):
 | P2P, mempool, engine API | Via Reth | No | No |
 | Decoding Op[] calldata from sealed blocks | No | Yes | No |
 | Notifying EntityDB of chain events | No | Yes | No |
+| Computing arkiv_stateRoot (internal only) | No | No | Yes |
+| Anchoring arkiv_stateRoot on-chain (future) | Stores per block | Submits tx | Returns root |
 | Maintaining private query index (trie + bitmaps) | No | No | Yes |
 | Handling reorgs in query index | No | Detects and signals | Applies via journal |
 | Serving entity queries | No | No | Yes |
