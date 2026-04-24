@@ -6,9 +6,9 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-// EntityRLP is the on-trie representation of an entity, stored as the code
+// Entity is the on-trie representation of an entity, stored as the code
 // field of the entity account. keccak256(RLP(entity)) is the account's codeHash.
-type EntityRLP struct {
+type Entity struct {
 	Payload            []byte
 	Owner              common.Address
 	Creator            common.Address
@@ -20,21 +20,21 @@ type EntityRLP struct {
 	// the address alone. Key is stored here so the query API can return it to clients,
 	// who need it to call EntityRegistry.commitment(entityKey) for payload verification.
 	Key                common.Hash
-	StringAnnotations  []stringAnnotRLP
-	NumericAnnotations []numericAnnotRLP
+	StringAnnotations  []stringAnnot
+	NumericAnnotations []numericAnnot
 }
 
-type stringAnnotRLP struct {
+type stringAnnot struct {
 	Key   string
 	Value string
 }
 
-type numericAnnotRLP struct {
+type numericAnnot struct {
 	Key   string
 	Value uint64
 }
 
-func encodeEntity(e EntityRLP) ([]byte, common.Hash, error) {
+func encodeEntity(e Entity) ([]byte, common.Hash, error) {
 	data, err := rlp.EncodeToBytes(e)
 	if err != nil {
 		return nil, common.Hash{}, err
@@ -42,14 +42,13 @@ func encodeEntity(e EntityRLP) ([]byte, common.Hash, error) {
 	return data, crypto.Keccak256Hash(data), nil
 }
 
-func decodeEntity(data []byte) (EntityRLP, error) {
-	var e EntityRLP
+func decodeEntity(data []byte) (Entity, error) {
+	var e Entity
 	return e, rlp.DecodeBytes(data, &e)
 }
 
-// DecodeEntityRLP decodes a raw RLP-encoded entity blob into an EntityRLP.
+// DecodeEntity decodes a raw RLP-encoded entity blob.
 // Used by callers outside the store package (e.g. the query server).
-func DecodeEntityRLP(data []byte) (EntityRLP, error) {
+func DecodeEntity(data []byte) (Entity, error) {
 	return decodeEntity(data)
 }
-

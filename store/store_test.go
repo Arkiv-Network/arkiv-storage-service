@@ -65,7 +65,7 @@ func openState(t *testing.T, s *Store) *state.StateDB {
 
 // getEntity decodes the entity at addr from the current canonical state.
 // Fails the test if the entity is absent.
-func getEntity(t *testing.T, s *Store, addr common.Address) EntityRLP {
+func getEntity(t *testing.T, s *Store, addr common.Address) Entity {
 	t.Helper()
 	code := openState(t, s).GetCode(addr)
 	if len(code) == 0 {

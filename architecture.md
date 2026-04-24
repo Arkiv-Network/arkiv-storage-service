@@ -22,7 +22,7 @@
   - [Entity Accounts](#entity-accounts)
     - [Address Derivation](#address-derivation)
     - [Account Structure](#account-structure)
-    - [EntityRLP](#entityrlp)
+    - [Entity](#entity)
     - [entity_id](#entity_id)
     - [System Account](#system-account)
   - [Annotation Bitmaps](#annotation-bitmaps)
@@ -316,7 +316,7 @@ pub enum ArkivOperation {
 #[derive(Serialize)]
 pub struct CreateOp {
     pub entity_key:   B256,      // keccak256(chainId || registry || owner || nonce) — from EntityOperation log
-    pub sender:       Address,   // becomes Creator in EntityRLP
+    pub sender:       Address,   // becomes Creator in the EntityDB
     pub payload:      Bytes,
     pub content_type: String,
     pub expires_at:   u64,       // block number, passed through directly from contract log
@@ -504,10 +504,10 @@ Entity Account  (address = entity_key[:20])
 
 A live entity account is never EIP-161-empty: the condition requires `nonce==0 && balance==0 && codeHash==emptyCodeHash`, but a live entity always has `codeHash ≠ emptyCodeHash`. No explicit nonce is needed to keep it alive. After deletion (`SetCode(nil)`), the account becomes EIP-161-empty and `StateDB.Finalise` prunes it from the trie — which is the desired behaviour. The `"arkiv_addr"` PebbleDB entry serves as the tombstone for any operational needs; there is no reason to retain a trie stub for a deleted entity.
 
-#### EntityRLP
+#### Entity
 
 ```go
-type EntityRLP struct {
+type Entity struct {
     Payload            []byte
     Owner              common.Address
     Creator            common.Address
@@ -515,8 +515,8 @@ type EntityRLP struct {
     CreatedAtBlock     uint64
     ContentType        string
     Key                common.Hash          // full 32-byte entityKey = keccak256(chainId || registry || owner || nonce)
-    StringAnnotations  []StringAnnotationRLP
-    NumericAnnotations []NumericAnnotationRLP
+    StringAnnotations  []stringAnnot
+    NumericAnnotations []numericAnnot
 }
 ```
 
@@ -651,7 +651,7 @@ Entity state is also accumulated in an in-memory per-block cache (`CacheStore.di
 2. `CreateAccount` on the entity address (nonce defaults to 0; no explicit nonce write needed).
 3. Write `slot[keccak256("id" || entity_id)] → address` in the system account via `StateDB.SetState` (trie-committed; reverts automatically on reorg).
 4. Write `"arkiv_id" + entity_id → address` and `"arkiv_addr" + address → entity_id` in PebbleDB. Record both in the per-block journal (fast-path cache; reverted explicitly on reorg).
-5. Store the new `EntityRLP` in the dirty entity cache. `SetCode` is deferred to `flushEntities` at commit.
+5. Store the new `Entity` in the dirty entity cache. `SetCode` is deferred to `flushEntities` at commit.
 6. For each annotation `(k, v)` including built-ins (`$all`, `$creator`, `$createdAtBlock`, `$owner`, `$key`, `$expiration`, `$contentType`): update the in-memory bitmap cache. The blob write is deferred to `flushBitmaps` at commit.
 
 #### Update
@@ -660,7 +660,7 @@ Entity state is also accumulated in an in-memory per-block cache (`CacheStore.di
 2. For each annotation removed: update the in-memory bitmap (remove `entity_id`).
 3. For each annotation added: update the in-memory bitmap (add `entity_id`).
 4. Unchanged annotations require no bitmap updates.
-5. Store the updated `EntityRLP` in the dirty entity cache. `SetCode` and bitmap blob writes are deferred to commit.
+5. Store the updated `Entity` in the dirty entity cache. `SetCode` and bitmap blob writes are deferred to commit.
 
 #### Delete
 

@@ -227,7 +227,7 @@ func (h *handler) fetchEntityData(atBlockNumber uint64, addr common.Address, inc
 	if err != nil {
 		return nil, err
 	}
-	e, err := store.DecodeEntityRLP(data)
+	e, err := store.DecodeEntity(data)
 	if err != nil {
 		return nil, fmt.Errorf("decode entity at %s: %w", addr, err)
 	}
@@ -276,7 +276,7 @@ func syntheticAnnot(key string) bool { return strings.HasPrefix(key, "$") }
 func userAnnot(key string) bool      { return !strings.HasPrefix(key, "$") }
 func anyAnnot(_ string) bool         { return true }
 
-func sortedStringAttrs(e store.EntityRLP, keep func(string) bool) []Attribute[string] {
+func sortedStringAttrs(e store.Entity, keep func(string) bool) []Attribute[string] {
 	var out []Attribute[string]
 	for _, a := range e.StringAnnotations {
 		if keep(a.Key) {
@@ -300,7 +300,7 @@ func sortedStringAttrs(e store.EntityRLP, keep func(string) bool) []Attribute[st
 	return out
 }
 
-func sortedNumericAttrs(e store.EntityRLP, keep func(string) bool) []Attribute[uint64] {
+func sortedNumericAttrs(e store.Entity, keep func(string) bool) []Attribute[uint64] {
 	var out []Attribute[uint64]
 	for _, a := range e.NumericAnnotations {
 		if keep(a.Key) {

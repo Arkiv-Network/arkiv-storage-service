@@ -100,7 +100,7 @@ type CacheStore struct {
 	parentHash  common.Hash
 
 	// Per-block caches. Accumulated during ApplyOp, flushed once in Commit.
-	dirtyEntities map[common.Address]*EntityRLP
+	dirtyEntities map[common.Address]*Entity
 	dirtyBitmaps  map[annotPair]*roaring64.Bitmap
 }
 
@@ -121,14 +121,14 @@ func newCacheStore(real ethdb.Database, parentRoot common.Hash, blockNumber uint
 		stateDB:       stateDB,
 		journal:       &blockJournal{},
 		blockNumber:   blockNumber,
-		dirtyEntities: make(map[common.Address]*EntityRLP),
+		dirtyEntities: make(map[common.Address]*Entity),
 		dirtyBitmaps:  make(map[annotPair]*roaring64.Bitmap),
 	}, nil
 }
 
 // getEntity returns the entity for addr from the dirty cache, loading and caching
 // it from the trie on first access. Returns an error if the entity does not exist.
-func (c *CacheStore) getEntity(addr common.Address) (*EntityRLP, error) {
+func (c *CacheStore) getEntity(addr common.Address) (*Entity, error) {
 	if e, ok := c.dirtyEntities[addr]; ok {
 		return e, nil
 	}

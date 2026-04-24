@@ -176,16 +176,16 @@ func (s *Store) IterateGlobAnnotBitmaps(key, pattern string) *roaring64.Bitmap {
 	return result
 }
 
-// GetEntityRLP returns the decoded entity at addr using the state at atBlockNumber.
+// GetEntity returns the decoded entity at addr using the state at atBlockNumber.
 // atBlockNumber == 0 means the current canonical head.
-func (s *Store) GetEntityRLP(atBlockNumber uint64, addr common.Address) (EntityRLP, error) {
+func (s *Store) GetEntity(atBlockNumber uint64, addr common.Address) (Entity, error) {
 	sdb, err := s.openStateAt(atBlockNumber)
 	if err != nil {
-		return EntityRLP{}, err
+		return Entity{}, err
 	}
 	code := sdb.GetCode(addr)
 	if len(code) == 0 {
-		return EntityRLP{}, fmt.Errorf("entity not found: %s", addr)
+		return Entity{}, fmt.Errorf("entity not found: %s", addr)
 	}
 	return decodeEntity(code)
 }

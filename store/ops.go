@@ -18,7 +18,7 @@ type annotPair struct {
 // builtinAnnotations returns the built-in annotation pairs for an entity.
 // Address and hash values are stored as lowercase hex so that the query
 // normaliser (which lowercases $owner/$creator/$key query values) can match them.
-func builtinAnnotations(e EntityRLP) []annotPair {
+func builtinAnnotations(e Entity) []annotPair {
 	return []annotPair{
 		{"$all", "true"},
 		{"$creator", strings.ToLower(e.Creator.Hex())},
@@ -31,7 +31,7 @@ func builtinAnnotations(e EntityRLP) []annotPair {
 }
 
 // userAnnotations returns the user-supplied annotation pairs for an entity.
-func userAnnotations(e EntityRLP) []annotPair {
+func userAnnotations(e Entity) []annotPair {
 	var pairs []annotPair
 	for _, a := range e.StringAnnotations {
 		pairs = append(pairs, annotPair{a.Key, a.Value})
@@ -43,7 +43,7 @@ func userAnnotations(e EntityRLP) []annotPair {
 }
 
 // allAnnotations returns built-ins + user annotations.
-func allAnnotations(e EntityRLP) []annotPair {
+func allAnnotations(e Entity) []annotPair {
 	return append(builtinAnnotations(e), userAnnotations(e)...)
 }
 
@@ -110,8 +110,8 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 		return err
 	}
 
-	// 3. Build EntityRLP and cache it; SetCode is deferred to flushEntities.
-	entity := &EntityRLP{
+	// 3. Build Entity and cache it; SetCode is deferred to flushEntities.
+	entity := &Entity{
 		Payload:        []byte(op.Payload),
 		Owner:          op.Owner,
 		Creator:        op.Sender,
@@ -122,9 +122,9 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 	}
 	for _, a := range op.Annotations {
 		if a.StringValue != nil {
-			entity.StringAnnotations = append(entity.StringAnnotations, stringAnnotRLP{a.Key, *a.StringValue})
+			entity.StringAnnotations = append(entity.StringAnnotations, stringAnnot{a.Key, *a.StringValue})
 		} else if a.NumericValue != nil {
-			entity.NumericAnnotations = append(entity.NumericAnnotations, numericAnnotRLP{a.Key, *a.NumericValue})
+			entity.NumericAnnotations = append(entity.NumericAnnotations, numericAnnot{a.Key, *a.NumericValue})
 		}
 	}
 	cs.dirtyEntities[addr] = entity
@@ -154,7 +154,7 @@ func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	}
 	entityID := decodeUint64(idBytes)
 
-	updated := &EntityRLP{
+	updated := &Entity{
 		Payload:        []byte(op.Payload),
 		Owner:          old.Owner,
 		Creator:        old.Creator,
@@ -165,9 +165,9 @@ func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	}
 	for _, a := range op.Annotations {
 		if a.StringValue != nil {
-			updated.StringAnnotations = append(updated.StringAnnotations, stringAnnotRLP{a.Key, *a.StringValue})
+			updated.StringAnnotations = append(updated.StringAnnotations, stringAnnot{a.Key, *a.StringValue})
 		} else if a.NumericValue != nil {
-			updated.NumericAnnotations = append(updated.NumericAnnotations, numericAnnotRLP{a.Key, *a.NumericValue})
+			updated.NumericAnnotations = append(updated.NumericAnnotations, numericAnnot{a.Key, *a.NumericValue})
 		}
 	}
 

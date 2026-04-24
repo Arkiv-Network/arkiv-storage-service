@@ -14,7 +14,7 @@ func TestBuiltinAnnotations(t *testing.T) {
 	owner := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 	key := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
-	e := EntityRLP{
+	e := Entity{
 		Owner:          owner,
 		Creator:        creator,
 		ExpiresAt:      1000,
