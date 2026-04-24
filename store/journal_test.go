@@ -57,8 +57,12 @@ func TestJournalRoundTrip(t *testing.T) {
 	}
 
 	// Revert.
-	if err := revertBlockJournal(db, blockNum, blockHash); err != nil {
+	batch := db.NewBatch()
+	if err := revertBlockJournal(db, batch, blockNum, blockHash); err != nil {
 		t.Fatalf("revertBlockJournal: %v", err)
+	}
+	if err := batch.Write(); err != nil {
+		t.Fatalf("batch.Write: %v", err)
 	}
 
 	// Keys A and B are restored to old values.
@@ -101,8 +105,12 @@ func TestJournalRevertOrder(t *testing.T) {
 	if err := j.persist(db, blockNum, blockHash); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
-	if err := revertBlockJournal(db, blockNum, blockHash); err != nil {
+	batch2 := db.NewBatch()
+	if err := revertBlockJournal(db, batch2, blockNum, blockHash); err != nil {
 		t.Fatalf("revertBlockJournal: %v", err)
+	}
+	if err := batch2.Write(); err != nil {
+		t.Fatalf("batch2.Write: %v", err)
 	}
 
 	// Reverse replay: entry[1] restores key=v1, then entry[0] deletes key.

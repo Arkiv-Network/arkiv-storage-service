@@ -671,16 +671,17 @@ Re-encode the RLP with the updated field; call `SetCode` with the new bytes. Upd
 
 ### Block Commit and State Root
 
-> **⚠ Non-atomic writes.** The trie (TrieDB) and the mutable PebbleDB entries have no shared transaction boundary. Steps 1–6 below are performed sequentially, and a crash between any two steps leaves the two stores in an inconsistent state. The current behaviour on restart is to re-open at the last persisted `arkiv_head`, which was written last: if the crash occurred before step 5, `arkiv_head` still points to the previous block, the new trie root is orphaned, and the mutable PebbleDB entries are in the pre-block state — consistent with the old head. The block is silently dropped and the ExEx must re-deliver it. If the crash occurred after step 5 but mid-way through a later write, partial state may be visible. This should be hardened before production with a write-ahead log or equivalent recovery mechanism.
+Block processing uses a write-ahead staging layer (`CacheStore`) to guarantee that all writes for a block land atomically. This matters because the EntityDB has two independent write paths — the trie (`TrieDB.Commit`) and direct PebbleDB mutations (bitmaps, ID maps, journal) — with no shared transaction boundary. Without coordination, a crash between them would leave the stores inconsistent: the trie ahead of the bitmap index, or vice versa. A partially-written block could corrupt query results or make reorg recovery unreliable.
+
+`CacheStore` solves this by staging all writes — trie nodes, entity RLP blobs, bitmaps, ID maps, journal entries, and the canonical head pointer — in an in-memory `memorydb` during block processing. Nothing touches PebbleDB until the very end, when a single `batch.Write()` flushes everything atomically. The canonical head (`arkiv_head`) is the last key written into the batch, so it acts as a commit gate: if the process crashes before `batch.Write()` completes, PebbleDB's WAL guarantees the write either fully applied or fully rolled back, and `arkiv_head` either reflects the new block or the previous one — never a partial state.
 
 After processing all operations for a block, the EntityDB:
 
-1. Calls `StateDB.Commit(blockNumber, true)` to flush trie changes and obtain the new `stateRoot`.
-2. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes to the underlying database. `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
-3. Persists the per-block journal for mutable PebbleDB entries.
-4. Writes `"arkiv_root" + blockHash → stateRoot` and `"arkiv_parent" + blockHash → parentHash` to PebbleDB.
-5. Writes `"arkiv_head" → blockNumber + blockHash + stateRoot` to PebbleDB, overwriting the previous canonical head record.
-6. Updates the in-memory canonical head pointer.
+1. Calls `StateDB.Commit(blockNumber, true)` to finalise trie changes; dirty nodes move into the per-block `TrieDB`'s memory cache.
+2. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes into the staging `memorydb` (not yet to PebbleDB). `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
+3. Flushes the per-block journal, block index entries (`arkiv_root`, `arkiv_parent`, `arkiv_blknum`), and the canonical head (`arkiv_head`) into the same staging `memorydb`.
+4. Calls a single `batch.Write()` to atomically copy all staged entries to PebbleDB.
+5. Updates the in-memory canonical head pointer.
 
 On restart, `New()` reads `"arkiv_head"` to restore the canonical head. If the key is absent (fresh database) the store starts from an empty trie (`EmptyRootHash`).
 
@@ -715,21 +716,19 @@ Writes to immutable entries (`"arkiv_bm"`, `"arkiv_pairs"`, `"arkiv_root"`) are 
 
 ### Revert Procedure
 
-> **⚠ Non-atomic writes.** The journal batch and the `arkiv_head` update are separate writes with no shared transaction. A crash after the journal batch commits but before `arkiv_head` is updated leaves PebbleDB in the reverted state while the canonical head still points to the reverted block. On restart the store opens at the stale head, with the trie root still valid but the PebbleDB bitmap/ID state inconsistent with it. Recovery logic is needed to detect and resolve this. See §4 (Block Commit and State Root) for the same issue on the commit path.
+Revert is also atomic. All writes for a given block reversion — journal replay, block index key deletions, and the updated `arkiv_head` — are collected into a single `rawDB.NewBatch()` and flushed in one `batch.Write()`. The trie requires no writes (HashScheme retains all historical roots); `arkiv_head` is the last key written into the batch, serving as the commit gate.
 
 To revert a sequence of blocks (newest-first):
 
 For each block being reverted:
 
 1. Read all journal entries for `(blockNumber, blockHash)` from PebbleDB.
-2. Replay them in reverse entry-index order:
+2. Add reverse-order replays to the batch:
    - If `OldValue` is nil, delete the key.
    - Otherwise, write `OldValue` back to the key.
-3. Delete the journal entries for this block.
-4. Delete `"arkiv_root" + blockHash` and `"arkiv_parent" + blockHash`.
-5. Write the updated `"arkiv_head"` pointing to the parent block.
-
-The trie is already at the correct state (it retains all historical roots); only the mutable PebbleDB entries require explicit reversion.
+3. Add deletions of the journal entries, `"arkiv_root" + blockHash`, `"arkiv_parent" + blockHash`, and `"arkiv_blknum" + blockNumber` to the batch.
+4. Add the updated `"arkiv_head"` pointing to the parent block to the batch.
+5. Call `batch.Write()` — all of the above lands atomically.
 
 ### Journal Pruning
 

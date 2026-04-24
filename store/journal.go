@@ -47,8 +47,9 @@ func (j *blockJournal) persist(db ethdb.Database, blockNumber uint64, blockHash 
 }
 
 // revertBlockJournal reads all journal entries for a block and replays them in
-// reverse, restoring mutable PebbleDB keys to their pre-block state.
-func revertBlockJournal(db ethdb.Database, blockNumber uint64, blockHash common.Hash) error {
+// reverse into batch, restoring mutable PebbleDB keys to their pre-block state.
+// The caller is responsible for calling batch.Write().
+func revertBlockJournal(db ethdb.Database, batch ethdb.Batch, blockNumber uint64, blockHash common.Hash) error {
 	prefix := journalPrefix(blockNumber, blockHash)
 
 	type indexed struct {
@@ -76,8 +77,6 @@ func revertBlockJournal(db ethdb.Database, blockNumber uint64, blockHash common.
 	// Sort ascending by index so we can reverse-iterate.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].idx < entries[j].idx })
 
-	batch := db.NewBatch()
-
 	// Replay in reverse order.
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i].entry
@@ -100,5 +99,5 @@ func revertBlockJournal(db ethdb.Database, blockNumber uint64, blockHash common.
 		}
 	}
 
-	return batch.Write()
+	return nil
 }

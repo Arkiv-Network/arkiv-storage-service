@@ -20,15 +20,22 @@ func NewMemory() *Store {
 	return New(rawdb.NewMemoryDatabase())
 }
 
-// Store maintains the entity state index. It wraps a Merkle Patricia Trie
-// (go-ethereum StateDB with HashScheme) and PebbleDB annotation bitmaps.
+// Store maintains the entity state index: a Merkle Patricia Trie (go-ethereum
+// StateDB with HashScheme) and PebbleDB annotation bitmaps. Historical state
+// roots are retained by HashScheme, enabling point-in-time reads.
 //
-// All historical state roots are retained by HashScheme, enabling point-in-time
-// reads without a separate snapshot mechanism.
+// Writes use a per-block CacheStore (staging layer) that accumulates all
+// mutations — trie nodes, entity blobs, bitmaps, ID maps, journal, and the
+// canonical head pointer — in an in-memory buffer and flushes them to PebbleDB
+// in a single atomic batch.Write(). This guarantees that a crash mid-block
+// never leaves the trie and bitmap index in inconsistent states.
+//
+// trieDB and stateDB on this struct are used only for the read path (queries,
+// openStateAt). All writes go through per-block CacheStore instances.
 type Store struct {
 	rawDB   ethdb.Database
 	trieDB  *triedb.Database
-	stateDB state.Database // wraps trieDB; re-used across blocks
+	stateDB state.Database
 
 	headRoot   common.Hash
 	headHash   common.Hash
@@ -65,72 +72,7 @@ func New(raw ethdb.Database) *Store {
 func (s *Store) ProcessBlock(block types.ArkivBlock) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Open a fresh StateDB at the current canonical state root.
-	sdb, err := state.New(s.headRoot, s.stateDB)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("open state at %s: %w", s.headRoot, err)
-	}
-
-	// Ensure the system account exists (idempotent after first block).
-	initSystemAccount(sdb)
-
-	j := &blockJournal{}
-	blockNumber := uint64(block.Header.Number)
-
-	for i, op := range block.Operations {
-		if err := applyOp(s.rawDB, sdb, j, op, blockNumber); err != nil {
-			return common.Hash{}, fmt.Errorf("op %d: %w", i, err)
-		}
-	}
-
-	// Commit trie changes and obtain new state root.
-	newRoot, err := sdb.Commit(blockNumber, true, false)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("commit state: %w", err)
-	}
-
-	// Flush trie nodes to the underlying database.
-	// false = do not garbage-collect old nodes; HashScheme retains all history.
-	if err := s.trieDB.Commit(newRoot, false); err != nil {
-		return common.Hash{}, fmt.Errorf("commit trie: %w", err)
-	}
-
-	// SAFETY: the trie and PebbleDB are separate stores with no shared transaction
-	// boundary. A crash between TrieDB.Commit above and the writes below leaves the
-	// two stores inconsistent: the trie has the new root but PebbleDB still reflects
-	// the previous block. On restart the canonical head (arkiv_head) will not yet
-	// point to the new root, so the store will re-open at the old head and the new
-	// trie root will be orphaned. The mutable PebbleDB entries (bitmaps, ID maps)
-	// will also be in the pre-block state, which is consistent with the old head.
-	// The net effect is that the block is silently dropped — the ExEx will need to
-	// re-deliver it. This is acceptable for now but should be hardened before
-	// production: see notes.md §3.
-
-	// Persist the per-block journal for mutable PebbleDB entries.
-	if err := j.persist(s.rawDB, blockNumber, block.Header.Hash); err != nil {
-		return common.Hash{}, fmt.Errorf("persist journal: %w", err)
-	}
-
-	// Record blockHash → stateRoot, blockHash → parentHash, and blockNumber → blockHash.
-	if err := s.rawDB.Put(rootKey(block.Header.Hash), newRoot.Bytes()); err != nil {
-		return common.Hash{}, err
-	}
-	if err := s.rawDB.Put(parentKey(block.Header.Hash), block.Header.ParentHash.Bytes()); err != nil {
-		return common.Hash{}, err
-	}
-	if err := s.rawDB.Put(blockNumberKey(blockNumber), block.Header.Hash.Bytes()); err != nil {
-		return common.Hash{}, err
-	}
-
-	s.headRoot = newRoot
-	s.headHash = block.Header.Hash
-	s.headNumber = blockNumber
-
-	if err := s.rawDB.Put(headKey, encodeHead(s.headNumber, s.headHash, s.headRoot)); err != nil {
-		return common.Hash{}, fmt.Errorf("persist head: %w", err)
-	}
-	return newRoot, nil
+	return s.processBlock(block)
 }
 
 // RevertBlock undoes the effects of a previously processed block and restores
@@ -138,53 +80,114 @@ func (s *Store) ProcessBlock(block types.ArkivBlock) (common.Hash, error) {
 func (s *Store) RevertBlock(ref types.ArkivBlockRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.revertBlock(ref)
+}
 
-	blockNumber := uint64(ref.Number)
+// Reorg atomically reverts revertedBlocks (newest-first) then applies newBlocks
+// (oldest-first). The write lock is held for the full duration, so no query
+// observes an intermediate state.
+func (s *Store) Reorg(revertedBlocks []types.ArkivBlockRef, newBlocks []types.ArkivBlock) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// SAFETY: revert is also non-atomic across the journal replay and the head
-	// write below. A crash after the journal batch commits but before arkiv_head
-	// is updated leaves the mutable PebbleDB entries in the reverted state while
-	// the canonical head still points to the (now-reverted) block. On restart the
-	// store will open at the stale head and attempt to read a trie root that is
-	// still valid (HashScheme retains it), but the PebbleDB bitmap/ID state will
-	// be ahead of it. This inconsistency must be detected and resolved at startup.
-	// See notes.md §3.
+	for _, ref := range revertedBlocks {
+		if err := s.revertBlock(ref); err != nil {
+			return fmt.Errorf("revert %s: %w", ref.Hash, err)
+		}
+	}
+	for i, block := range newBlocks {
+		if _, err := s.processBlock(block); err != nil {
+			return fmt.Errorf("new block %d: %w", i, err)
+		}
+	}
+	return nil
+}
 
-	// Replay the PebbleDB journal in reverse to undo mutable entries.
-	// The trie reverts automatically via HashScheme (no trie writes needed).
-	if err := revertBlockJournal(s.rawDB, blockNumber, ref.Hash); err != nil {
-		return fmt.Errorf("revert journal: %w", err)
+// processBlock is the internal implementation of ProcessBlock. Callers must hold s.mu.
+func (s *Store) processBlock(block types.ArkivBlock) (common.Hash, error) {
+	blockNumber := uint64(block.Header.Number)
+
+	cs, err := newCacheStore(s.rawDB, s.headRoot, blockNumber)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	cs.blockHash = block.Header.Hash
+	cs.parentHash = block.Header.ParentHash
+
+	initSystemAccount(cs.stateDB)
+
+	for i, op := range block.Operations {
+		if err := cs.ApplyOp(op); err != nil {
+			cs.Discard()
+			return common.Hash{}, fmt.Errorf("op %d: %w", i, err)
+		}
 	}
 
-	// Look up the parent hash to restore the canonical head.
+	newRoot, err := cs.Commit()
+	if err != nil {
+		cs.Discard()
+		return common.Hash{}, err
+	}
+
+	s.headRoot = newRoot
+	s.headHash = block.Header.Hash
+	s.headNumber = blockNumber
+	return newRoot, nil
+}
+
+// revertBlock is the internal implementation of RevertBlock. Callers must hold s.mu.
+// All writes — journal replay, block index cleanup, and the updated head pointer —
+// land in a single atomic batch.Write().
+func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
+	blockNumber := uint64(ref.Number)
+
 	parentHashBytes, err := s.rawDB.Get(parentKey(ref.Hash))
 	if err != nil {
 		return fmt.Errorf("parent hash not found for block %s: %w", ref.Hash, err)
 	}
 	parentHash := common.BytesToHash(parentHashBytes)
 
-	// Clean up root, parent, and block-number mappings for the reverted block.
-	_ = s.rawDB.Delete(rootKey(ref.Hash))
-	_ = s.rawDB.Delete(parentKey(ref.Hash))
-	_ = s.rawDB.Delete(blockNumberKey(blockNumber))
-
-	// Restore the parent's state root (may be EmptyRootHash for the genesis parent).
 	var parentRoot common.Hash
-	if rootBytes, err := s.rawDB.Get(rootKey(parentHash)); err == nil {
-		parentRoot = common.BytesToHash(rootBytes)
+	if b, err := s.rawDB.Get(rootKey(parentHash)); err == nil {
+		parentRoot = common.BytesToHash(b)
 	} else {
 		parentRoot = ethtypes.EmptyRootHash
 	}
 
-	s.headHash = parentHash
-	s.headRoot = parentRoot
-	if blockNumber > 0 {
-		s.headNumber = blockNumber - 1
+	batch := s.rawDB.NewBatch()
+
+	// Journal replay (reverse order) + journal key deletions into batch.
+	if err := revertBlockJournal(s.rawDB, batch, blockNumber, ref.Hash); err != nil {
+		return fmt.Errorf("revert journal: %w", err)
 	}
 
-	if err := s.rawDB.Put(headKey, encodeHead(s.headNumber, s.headHash, s.headRoot)); err != nil {
-		return fmt.Errorf("persist head: %w", err)
+	// Block index cleanup.
+	if err := batch.Delete(rootKey(ref.Hash)); err != nil {
+		return err
 	}
+	if err := batch.Delete(parentKey(ref.Hash)); err != nil {
+		return err
+	}
+	if err := batch.Delete(blockNumberKey(blockNumber)); err != nil {
+		return err
+	}
+
+	// Head pointer — written last as the commit gate for the revert.
+	newHeadNumber := uint64(0)
+	if blockNumber > 0 {
+		newHeadNumber = blockNumber - 1
+	}
+	if err := batch.Put(headKey, encodeHead(newHeadNumber, parentHash, parentRoot)); err != nil {
+		return err
+	}
+
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("atomic revert flush: %w", err)
+	}
+
+	s.headRoot = parentRoot
+	s.headHash = parentHash
+	s.headNumber = newHeadNumber
 	return nil
 }
 
