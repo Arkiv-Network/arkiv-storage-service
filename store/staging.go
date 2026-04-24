@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/Arkiv-Network/arkiv-storage-service/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -84,8 +85,11 @@ func (s *StagingDB) discard() {
 }
 
 // CacheStore is a write buffer for a single block. All trie mutations go through
-// stateDB; all direct PebbleDB mutations go through stagingDB. Commit flushes
-// both atomically via a single batch.Write(). Discard throws everything away.
+// stateDB; all direct PebbleDB mutations go through stagingDB. Entity and bitmap
+// state is accumulated in dirtyEntities/dirtyBitmaps and flushed once at Commit,
+// so each annotation blob and entity encoding is written exactly once per block.
+// Commit flushes everything atomically via a single batch.Write(). Discard throws
+// everything away.
 type CacheStore struct {
 	stagingDB   *StagingDB
 	trieDB      *triedb.Database
@@ -94,6 +98,10 @@ type CacheStore struct {
 	blockNumber uint64
 	blockHash   common.Hash
 	parentHash  common.Hash
+
+	// Per-block caches. Accumulated during ApplyOp, flushed once in Commit.
+	dirtyEntities map[common.Address]*EntityRLP
+	dirtyBitmaps  map[annotPair]*roaring64.Bitmap
 }
 
 func newCacheStore(real ethdb.Database, parentRoot common.Hash, blockNumber uint64) (*CacheStore, error) {
@@ -108,43 +116,75 @@ func newCacheStore(real ethdb.Database, parentRoot common.Hash, blockNumber uint
 		return nil, fmt.Errorf("open state at %s: %w", parentRoot, err)
 	}
 	return &CacheStore{
-		stagingDB:   staging,
-		trieDB:      tdb,
-		stateDB:     stateDB,
-		journal:     &blockJournal{},
-		blockNumber: blockNumber,
+		stagingDB:     staging,
+		trieDB:        tdb,
+		stateDB:       stateDB,
+		journal:       &blockJournal{},
+		blockNumber:   blockNumber,
+		dirtyEntities: make(map[common.Address]*EntityRLP),
+		dirtyBitmaps:  make(map[annotPair]*roaring64.Bitmap),
 	}, nil
+}
+
+// getEntity returns the entity for addr from the dirty cache, loading and caching
+// it from the trie on first access. Returns an error if the entity does not exist.
+func (c *CacheStore) getEntity(addr common.Address) (*EntityRLP, error) {
+	if e, ok := c.dirtyEntities[addr]; ok {
+		return e, nil
+	}
+	code := c.stateDB.GetCode(addr)
+	if len(code) == 0 {
+		return nil, fmt.Errorf("entity %s not found", addr)
+	}
+	e, err := decodeEntity(code)
+	if err != nil {
+		return nil, fmt.Errorf("decode entity: %w", err)
+	}
+	c.dirtyEntities[addr] = &e
+	return c.dirtyEntities[addr], nil
 }
 
 // ApplyOp applies a single Arkiv operation against the staged state.
 func (c *CacheStore) ApplyOp(op types.ArkivOperation) error {
-	return applyOp(c.stagingDB, c.stateDB, c.journal, op, c.blockNumber)
+	return applyOp(c, op)
 }
 
 // Commit finalises the trie, flushes all staged writes atomically, and returns
 // the new arkiv_stateRoot. Nothing touches the real DB until this call succeeds.
 func (c *CacheStore) Commit() (common.Hash, error) {
-	// 1. Finalise the StateDB; dirty trie nodes move into the per-block trieDB's
+	// 1. Encode each dirty entity once and call SetCode. One encode+SetCode per
+	//    entity per block regardless of how many ops touched it.
+	if err := c.flushEntities(); err != nil {
+		return common.Hash{}, fmt.Errorf("flush entities: %w", err)
+	}
+
+	// 2. Serialise each dirty bitmap once: write one blob + update the annot pointer
+	//    and trie slot per annotation. One blob per annotation per block.
+	if err := c.flushBitmaps(); err != nil {
+		return common.Hash{}, fmt.Errorf("flush bitmaps: %w", err)
+	}
+
+	// 3. Finalise the StateDB; dirty trie nodes move into the per-block trieDB's
 	//    memory cache.
 	newRoot, err := c.stateDB.Commit(c.blockNumber, true, false)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("commit state: %w", err)
 	}
 
-	// 2. Flush the per-block trieDB into the staging memorydb.
+	// 4. Flush the per-block trieDB into the staging memorydb.
 	//    hashdb.Commit calls staging.NewBatch() → memorydb.batch → Write() →
 	//    commits to staging memorydb. Not on disk yet.
 	if err := c.trieDB.Commit(newRoot, false); err != nil {
 		return common.Hash{}, fmt.Errorf("commit trie: %w", err)
 	}
 
-	// 3. Journal entries go into the staging memorydb.
+	// 5. Journal entries go into the staging memorydb.
 	//    persist calls stagingDB.NewBatch() → memorydb.batch → Write() → memorydb.
 	if err := c.journal.persist(c.stagingDB, c.blockNumber, c.blockHash); err != nil {
 		return common.Hash{}, fmt.Errorf("persist journal: %w", err)
 	}
 
-	// 4. Block index entries.
+	// 6. Block index entries.
 	if err := c.stagingDB.Put(rootKey(c.blockHash), newRoot.Bytes()); err != nil {
 		return common.Hash{}, err
 	}
@@ -155,7 +195,7 @@ func (c *CacheStore) Commit() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 
-	// 5. Canonical head pointer — written last as the commit gate.
+	// 7. Canonical head pointer — written last as the commit gate.
 	//    A crash before this write leaves arkiv_head at the previous block;
 	//    the store reopens in a consistent state. Orphaned trie nodes are
 	//    harmless (HashScheme never deletes content-addressed entries by hash).
@@ -163,7 +203,7 @@ func (c *CacheStore) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("stage head: %w", err)
 	}
 
-	// 6. Single atomic flush: trie nodes + entity blobs + bitmaps + ID maps +
+	// 8. Single atomic flush: trie nodes + entity blobs + bitmaps + ID maps +
 	//    journal + block index + canonical head all land in one batch.Write().
 	if err := c.stagingDB.commit(); err != nil {
 		return common.Hash{}, fmt.Errorf("atomic flush: %w", err)

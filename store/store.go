@@ -191,19 +191,3 @@ func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
 	return nil
 }
 
-func applyOp(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op types.ArkivOperation, blockNumber uint64) error {
-	switch {
-	case op.Create != nil:
-		return processCreate(db, sdb, j, op.Create, blockNumber)
-	case op.Update != nil:
-		return processUpdate(db, sdb, j, op.Update)
-	case op.Delete != nil:
-		return processDelete(db, sdb, j, op.Delete)
-	case op.Extend != nil:
-		return processExtend(db, sdb, j, op.Extend)
-	case op.ChangeOwner != nil:
-		return processChangeOwner(db, sdb, j, op.ChangeOwner)
-	default:
-		return fmt.Errorf("empty operation")
-	}
-}

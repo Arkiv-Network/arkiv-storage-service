@@ -1,77 +1,83 @@
 package store
 
 import (
+	"fmt"
+
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethdb"
 )
 
-// bitmapAdd adds entityID to the bitmap for (key, val) and journals the change.
-func bitmapAdd(db ethdb.Database, sdb *state.StateDB, j *blockJournal, key, val string, entityID uint64) error {
-	return mutateBitmap(db, sdb, j, key, val, func(bm *roaring64.Bitmap) {
+// bitmapAdd adds entityID to the in-block bitmap cache for (key, val).
+func bitmapAdd(cs *CacheStore, key, val string, entityID uint64) error {
+	return mutateBitmap(cs, key, val, func(bm *roaring64.Bitmap) {
 		bm.Add(entityID)
 	})
 }
 
-// bitmapRemove removes entityID from the bitmap for (key, val) and journals the change.
-func bitmapRemove(db ethdb.Database, sdb *state.StateDB, j *blockJournal, key, val string, entityID uint64) error {
-	return mutateBitmap(db, sdb, j, key, val, func(bm *roaring64.Bitmap) {
+// bitmapRemove removes entityID from the in-block bitmap cache for (key, val).
+func bitmapRemove(cs *CacheStore, key, val string, entityID uint64) error {
+	return mutateBitmap(cs, key, val, func(bm *roaring64.Bitmap) {
 		bm.Remove(entityID)
 	})
 }
 
-func mutateBitmap(db ethdb.Database, sdb *state.StateDB, j *blockJournal, key, val string, mutate func(*roaring64.Bitmap)) error {
-	pKey := annotKey(key, val)
+// mutateBitmap loads the bitmap for (key, val) into the per-block dirty cache
+// on first touch, journals the pre-block pointer value, then applies mutate.
+// The bitmap is not written to stagingDB until flushBitmaps() is called at
+// Commit time, so each annotation produces exactly one blob per block.
+func mutateBitmap(cs *CacheStore, key, val string, mutate func(*roaring64.Bitmap)) error {
+	pair := annotPair{key, val}
 
-	// Read the current pointer hash (nil if absent).
-	oldHashBytes, _ := db.Get(pKey)
+	if _, cached := cs.dirtyBitmaps[pair]; !cached {
+		// First touch: read pre-block pointer and journal it for revert.
+		oldHashBytes, _ := cs.stagingDB.Get(annotKey(key, val))
+		cs.journal.record(annotKey(key, val), oldHashBytes)
 
-	// Journal the old pointer value before modifying it.
-	j.record(pKey, oldHashBytes)
+		// Load the existing bitmap, or start fresh if this annotation is new.
+		bm := roaring64.New()
+		if len(oldHashBytes) == common.HashLength {
+			bmBytes, err := cs.stagingDB.Get(bitmapKey(common.BytesToHash(oldHashBytes)))
+			if err != nil {
+				return err
+			}
+			if err := bm.UnmarshalBinary(bmBytes); err != nil {
+				return err
+			}
+		}
+		cs.dirtyBitmaps[pair] = bm
+	}
 
-	// Load or create bitmap.
-	bm := roaring64.New()
-	if len(oldHashBytes) == common.HashLength {
-		bmBytes, err := db.Get(bitmapKey(common.BytesToHash(oldHashBytes)))
+	mutate(cs.dirtyBitmaps[pair])
+	return nil
+}
+
+// flushBitmaps serialises every dirty bitmap, writes one content-addressed blob
+// and one pointer update per annotation to stagingDB, and updates the trie slot.
+// Called once per block from CacheStore.Commit(), before stateDB.Commit().
+func (c *CacheStore) flushBitmaps() error {
+	for pair, bm := range c.dirtyBitmaps {
+		newBytes, err := bm.MarshalBinary()
 		if err != nil {
+			return fmt.Errorf("marshal bitmap (%s, %s): %w", pair.key, pair.val, err)
+		}
+		newHash := crypto.Keccak256Hash(newBytes)
+
+		if err := c.stagingDB.Put(bitmapKey(newHash), newBytes); err != nil {
 			return err
 		}
-		if err := bm.UnmarshalBinary(bmBytes); err != nil {
+		if err := c.stagingDB.Put(annotKey(pair.key, pair.val), newHash.Bytes()); err != nil {
 			return err
 		}
-	}
+		setAnnotSlot(c.stateDB, pair.key, pair.val, newHash)
 
-	mutate(bm)
-
-	// Serialize the new bitmap and compute its content-addressed key.
-	newBytes, err := bm.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	newHash := crypto.Keccak256Hash(newBytes)
-
-	// Write new immutable bitmap entry (old entry is left in place).
-	if err := db.Put(bitmapKey(newHash), newBytes); err != nil {
-		return err
-	}
-
-	// Update mutable pointer.
-	if err := db.Put(pKey, newHash.Bytes()); err != nil {
-		return err
-	}
-
-	// Update trie-committed system account slot.
-	setAnnotSlot(sdb, key, val, newHash)
-
-	// Record in the append-only existence index (never reverted).
-	pk := pairsKey(key, val)
-	if has, _ := db.Has(pk); !has {
-		if err := db.Put(pk, []byte{0x01}); err != nil {
-			return err
+		// Existence index: written once per annotation pair ever seen.
+		pk := pairsKey(pair.key, pair.val)
+		if has, _ := c.stagingDB.Has(pk); !has {
+			if err := c.stagingDB.Put(pk, []byte{0x01}); err != nil {
+				return err
+			}
 		}
 	}
-
 	return nil
 }

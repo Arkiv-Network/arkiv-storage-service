@@ -612,17 +612,25 @@ The `"\x00"` separator between `annotKey` and `annotVal` ensures prefix scans ca
 
 #### Write Path
 
-On any operation that modifies a bitmap for a given `(annotKey, annotVal)` pair:
+Bitmap mutations are accumulated in an in-memory per-block cache (`CacheStore.dirtyBitmaps`) and flushed to PebbleDB once at the end of the block. This ensures each annotation produces exactly one content-addressed blob per block, regardless of how many operations touched it.
+
+On first access to a `(annotKey, annotVal)` pair within a block:
 
 1. Read the current hash `H_old` from `"arkiv_annot" + annotKey + "\x00" + annotVal` (treat as empty bitmap if absent).
-2. If `H_old` is non-zero, fetch bytes from `"arkiv_bm" + H_old`; deserialize.
-3. Apply the change (add or remove `entity_id`).
-4. Serialize the new bitmap; compute `H_new = keccak256(new_bytes)`.
-5. Write `"arkiv_bm" + H_new → new_bytes` (new immutable entry; `H_old` entry is left in place).
-6. Write `H_new` to `"arkiv_annot" + annotKey + "\x00" + annotVal` (mutable pointer).
-7. Write `H_new` to the system account slot via `StateDB.SetState` (trie-committed).
-8. If this is the first time this pair is written, write `"arkiv_pairs" + annotKey + "\x00" + annotVal → \x01`.
-9. Record `{key: "arkiv_annot" + ..., oldValue: H_old}` in the per-block journal.
+2. Record `{key: "arkiv_annot" + ..., oldValue: H_old}` in the per-block journal (once per pair per block).
+3. If `H_old` is non-zero, fetch bytes from `"arkiv_bm" + H_old`; deserialize into the in-memory cache.
+
+On each operation that touches the pair within the block:
+
+4. Apply the change (add or remove `entity_id`) to the cached in-memory bitmap. No PebbleDB write yet.
+
+At block commit (`flushBitmaps`, called once per block before `StateDB.Commit`):
+
+5. Serialize the final bitmap; compute `H_new = keccak256(new_bytes)`.
+6. Write `"arkiv_bm" + H_new → new_bytes` (one new immutable entry per dirty annotation; `H_old` entry is left in place).
+7. Write `H_new` to `"arkiv_annot" + annotKey + "\x00" + annotVal` (mutable pointer).
+8. Write `H_new` to the system account slot via `StateDB.SetState` (trie-committed).
+9. If this is the first time this pair has ever been written, write `"arkiv_pairs" + annotKey + "\x00" + annotVal → \x01`.
 
 #### Read Path
 
@@ -635,30 +643,32 @@ For historical reads, step 1 is replaced by a trie lookup of the system account 
 
 ### Lifecycle
 
+Entity state is also accumulated in an in-memory per-block cache (`CacheStore.dirtyEntities`). Operations read from and write to this cache; encoding and `SetCode` are deferred to a single `flushEntities` step at commit time. This means each entity is encoded exactly once per block regardless of how many operations touched it, and the redundant decode→encode round-trips that would otherwise occur when the same entity is modified multiple times in one block are eliminated.
+
 #### Create
 
 1. Read and increment `entity_count` in the system account; the new value is `entity_id`.
 2. `CreateAccount` on the entity address (nonce defaults to 0; no explicit nonce write needed).
 3. Write `slot[keccak256("id" || entity_id)] → address` in the system account via `StateDB.SetState` (trie-committed; reverts automatically on reorg).
 4. Write `"arkiv_id" + entity_id → address` and `"arkiv_addr" + address → entity_id` in PebbleDB. Record both in the per-block journal (fast-path cache; reverted explicitly on reorg).
-5. For each annotation `(k, v)` including built-ins (`$all`, `$creator`, `$createdAtBlock`, `$owner`, `$key`, `$expiration`, `$contentType`): run the bitmap write path (§3.2.3).
-6. Encode entity as `RLP(entity)`; call `SetCode` on the entity account.
+5. Store the new `EntityRLP` in the dirty entity cache. `SetCode` is deferred to `flushEntities` at commit.
+6. For each annotation `(k, v)` including built-ins (`$all`, `$creator`, `$createdAtBlock`, `$owner`, `$key`, `$expiration`, `$contentType`): update the in-memory bitmap cache. The blob write is deferred to `flushBitmaps` at commit.
 
 #### Update
 
-1. Decode the current annotation set from the entity's existing code: `entity.DecodeRLP(code[1:])`.
-2. For each annotation removed: run the bitmap write path (remove `entity_id`).
-3. For each annotation added: run the bitmap write path (add `entity_id`).
-4. Unchanged annotations require no bitmap writes.
-5. Re-encode entity; call `SetCode` with new bytes. Built-in annotation bitmaps for `$owner`, `$expiration`, `$contentType` are updated if those fields changed.
+1. Load the entity from the dirty cache, or decode from trie on first access (subsequent accesses within the block hit the cache).
+2. For each annotation removed: update the in-memory bitmap (remove `entity_id`).
+3. For each annotation added: update the in-memory bitmap (add `entity_id`).
+4. Unchanged annotations require no bitmap updates.
+5. Store the updated `EntityRLP` in the dirty entity cache. `SetCode` and bitmap blob writes are deferred to commit.
 
 #### Delete
 
-1. Decode the current annotation set from the entity's existing code.
+1. Load the entity from the dirty cache or trie.
 2. Read `entity_id` from `"arkiv_addr" + address` in PebbleDB.
-3. For each annotation: run the bitmap write path (remove `entity_id`).
+3. For each annotation: update the in-memory bitmap (remove `entity_id`). Bitmap blob writes are deferred to `flushBitmaps`.
 4. Clear `slot[keccak256("id" || entity_id)]` in the system account via `StateDB.SetState(..., 0)` (trie-committed; reverts automatically on reorg).
-5. Call `SetCode(nil)`. The account now has nonce=0, balance=0, `codeHash=emptyCodeHash` — EIP-161-empty. `StateDB.Finalise` will prune it from the trie, which is the desired outcome. Entity accounts have no storage, so `handleDestruction` will not error.
+5. Remove the entity from the dirty cache and call `SetCode(nil)` immediately. The account is now EIP-161-empty and will be pruned by `StateDB.Finalise`. `SetCode(nil)` must be applied immediately (not deferred) so that subsequent operations in the same block see the entity as absent.
 6. Leave `"arkiv_id"` and `"arkiv_addr"` entries in place — they serve as tombstones in PebbleDB. Record no journal entry for them; they are never reverted on a chain revert. When the trie is reverted to the pre-delete state root (via HashScheme), the entity account and the system account `id` slot both reappear automatically.
 
 #### Entity Expiration (Housekeeping)
@@ -667,7 +677,7 @@ Identical to Delete. The housekeeping process runs periodically, scanning entiti
 
 #### Extend / ChangeOwner
 
-Re-encode the RLP with the updated field; call `SetCode` with the new bytes. Update any affected built-in annotation bitmaps (`$expiration` for Extend; `$owner` for ChangeOwner). No `entity_id` slot changes.
+Load the entity from the dirty cache or trie; update the relevant field in place. Update the affected built-in annotation bitmap in the in-memory cache (`$expiration` for Extend; `$owner` for ChangeOwner). Both the entity encoding and the bitmap blob write are deferred to commit. No `entity_id` slot changes.
 
 ### Block Commit and State Root
 
@@ -677,11 +687,13 @@ Block processing uses a write-ahead staging layer (`CacheStore`) to guarantee th
 
 After processing all operations for a block, the EntityDB:
 
-1. Calls `StateDB.Commit(blockNumber, true)` to finalise trie changes; dirty nodes move into the per-block `TrieDB`'s memory cache.
-2. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes into the staging `memorydb` (not yet to PebbleDB). `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
-3. Flushes the per-block journal, block index entries (`arkiv_root`, `arkiv_parent`, `arkiv_blknum`), and the canonical head (`arkiv_head`) into the same staging `memorydb`.
-4. Calls a single `batch.Write()` to atomically copy all staged entries to PebbleDB.
-5. Updates the in-memory canonical head pointer.
+1. Calls `flushEntities()`: encodes each dirty entity once and calls `SetCode`. One RLP encode + one `SetCode` per entity per block, regardless of how many operations modified it.
+2. Calls `flushBitmaps()`: serialises each dirty bitmap once, writes one content-addressed blob and one pointer update per annotation to the staging `memorydb`, and updates the corresponding system account trie slot via `StateDB.SetState`. One blob per annotation per block.
+3. Calls `StateDB.Commit(blockNumber, true)` to finalise trie changes (entity code and annotation slots from steps 1–2 included); dirty nodes move into the per-block `TrieDB`'s memory cache.
+4. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes into the staging `memorydb` (not yet to PebbleDB). `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
+5. Flushes the per-block journal, block index entries (`arkiv_root`, `arkiv_parent`, `arkiv_blknum`), and the canonical head (`arkiv_head`) into the same staging `memorydb`.
+6. Calls a single `batch.Write()` to atomically copy all staged entries to PebbleDB.
+7. Updates the in-memory canonical head pointer.
 
 On restart, `New()` reads `"arkiv_head"` to restore the canonical head. If the key is absent (fresh database) the store starts from an empty trie (`EmptyRootHash`).
 

@@ -6,9 +6,7 @@ import (
 
 	"github.com/Arkiv-Network/arkiv-storage-service/types"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/ethdb"
 )
 
 // annotPair is a (key, val) annotation pair as stored in the bitmap index.
@@ -58,41 +56,67 @@ func annotPairSet(pairs []annotPair) map[annotPair]struct{} {
 	return m
 }
 
+// applyOp dispatches a single Arkiv operation to its handler.
+func applyOp(cs *CacheStore, op types.ArkivOperation) error {
+	switch {
+	case op.Create != nil:
+		return processCreate(cs, op.Create)
+	case op.Update != nil:
+		return processUpdate(cs, op.Update)
+	case op.Delete != nil:
+		return processDelete(cs, op.Delete)
+	case op.Extend != nil:
+		return processExtend(cs, op.Extend)
+	case op.ChangeOwner != nil:
+		return processChangeOwner(cs, op.ChangeOwner)
+	default:
+		return fmt.Errorf("empty operation")
+	}
+}
+
+// flushEntities encodes every dirty entity once and calls SetCode. Called once
+// per block from CacheStore.Commit(), before stateDB.Commit().
+func (c *CacheStore) flushEntities() error {
+	for addr, entity := range c.dirtyEntities {
+		data, _, err := encodeEntity(*entity)
+		if err != nil {
+			return err
+		}
+		c.stateDB.SetCode(addr, data, tracing.CodeChangeUnspecified)
+	}
+	return nil
+}
+
 // processCreate applies a Create operation.
-func processCreate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.CreateOp, blockNumber uint64) error {
-	// Entity address is the first 20 bytes of the contract's entityKey.
+func processCreate(cs *CacheStore, op *types.CreateOp) error {
 	addr := common.Address(op.EntityKey[:20])
 
-	// 1. Assign entity ID.
-	entityID := incrementEntityCount(sdb)
+	// 1. Assign entity ID and set up the trie account.
+	entityID := incrementEntityCount(cs.stateDB)
+	cs.stateDB.CreateAccount(addr)
+	setIDSlot(cs.stateDB, entityID, addr)
 
-	// 2. Create account in the trie.
-	sdb.CreateAccount(addr)
-
-	// 3. Write ID→address trie slot (trie-committed; reverts automatically on reorg).
-	setIDSlot(sdb, entityID, addr)
-
-	// 4. Write PebbleDB ID/addr mappings and journal them (mutable; explicit revert).
+	// 2. Write PebbleDB ID/addr mappings and journal them (mutable; explicit revert).
 	idK := idKey(entityID)
 	addrK := addrKey(addr)
-	oldID, _ := db.Get(idK)
-	oldAddr, _ := db.Get(addrK)
-	j.record(idK, oldID)
-	j.record(addrK, oldAddr)
-	if err := db.Put(idK, addr.Bytes()); err != nil {
+	oldID, _ := cs.stagingDB.Get(idK)
+	oldAddr, _ := cs.stagingDB.Get(addrK)
+	cs.journal.record(idK, oldID)
+	cs.journal.record(addrK, oldAddr)
+	if err := cs.stagingDB.Put(idK, addr.Bytes()); err != nil {
 		return err
 	}
-	if err := db.Put(addrK, encodeUint64(entityID)); err != nil {
+	if err := cs.stagingDB.Put(addrK, encodeUint64(entityID)); err != nil {
 		return err
 	}
 
-	// 5. Build EntityRLP.
-	entity := EntityRLP{
+	// 3. Build EntityRLP and cache it; SetCode is deferred to flushEntities.
+	entity := &EntityRLP{
 		Payload:        []byte(op.Payload),
 		Owner:          op.Owner,
 		Creator:        op.Sender,
 		ExpiresAt:      op.ExpiresAt,
-		CreatedAtBlock: blockNumber,
+		CreatedAtBlock: cs.blockNumber,
 		ContentType:    op.ContentType,
 		Key:            op.EntityKey,
 	}
@@ -103,47 +127,36 @@ func processCreate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 			entity.NumericAnnotations = append(entity.NumericAnnotations, numericAnnotRLP{a.Key, *a.NumericValue})
 		}
 	}
+	cs.dirtyEntities[addr] = entity
 
-	// 6. Write annotation bitmaps.
-	for _, pair := range allAnnotations(entity) {
-		if err := bitmapAdd(db, sdb, j, pair.key, pair.val, entityID); err != nil {
+	// 4. Update bitmap caches; blobs are deferred to flushBitmaps.
+	for _, pair := range allAnnotations(*entity) {
+		if err := bitmapAdd(cs, pair.key, pair.val, entityID); err != nil {
 			return fmt.Errorf("bitmap add %q: %w", pair.key, err)
 		}
 	}
 
-	// 7. Encode entity and set as account code.
-	data, _, err := encodeEntity(entity)
-	if err != nil {
-		return err
-	}
-	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }
 
 // processUpdate applies an Update operation.
-func processUpdate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.UpdateOp) error {
+func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	addr := common.Address(op.EntityKey[:20])
-	code := sdb.GetCode(addr)
-	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", addr)
-	}
-	old, err := decodeEntity(code)
+
+	old, err := cs.getEntity(addr)
 	if err != nil {
-		return fmt.Errorf("decode entity: %w", err)
+		return err
 	}
 
-	// Resolve entity ID for bitmap operations.
-	addrK := addrKey(addr)
-	idBytes, err := db.Get(addrK)
+	idBytes, err := cs.stagingDB.Get(addrKey(addr))
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
 	}
 	entityID := decodeUint64(idBytes)
 
-	// Build new entity.
-	updated := EntityRLP{
+	updated := &EntityRLP{
 		Payload:        []byte(op.Payload),
-		Owner:          old.Owner, // Update does not change owner
+		Owner:          old.Owner,
 		Creator:        old.Creator,
 		ExpiresAt:      op.ExpiresAt,
 		CreatedAtBlock: old.CreatedAtBlock,
@@ -158,137 +171,108 @@ func processUpdate(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *t
 		}
 	}
 
-	// Diff annotation sets and update bitmaps.
-	oldSet := annotPairSet(allAnnotations(old))
-	newSet := annotPairSet(allAnnotations(updated))
+	oldSet := annotPairSet(allAnnotations(*old))
+	newSet := annotPairSet(allAnnotations(*updated))
 
 	for pair := range oldSet {
 		if _, kept := newSet[pair]; !kept {
-			if err := bitmapRemove(db, sdb, j, pair.key, pair.val, entityID); err != nil {
+			if err := bitmapRemove(cs, pair.key, pair.val, entityID); err != nil {
 				return fmt.Errorf("bitmap remove %q: %w", pair.key, err)
 			}
 		}
 	}
 	for pair := range newSet {
 		if _, existed := oldSet[pair]; !existed {
-			if err := bitmapAdd(db, sdb, j, pair.key, pair.val, entityID); err != nil {
+			if err := bitmapAdd(cs, pair.key, pair.val, entityID); err != nil {
 				return fmt.Errorf("bitmap add %q: %w", pair.key, err)
 			}
 		}
 	}
 
-	data, _, err := encodeEntity(updated)
-	if err != nil {
-		return err
-	}
-	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
+	cs.dirtyEntities[addr] = updated
 	return nil
 }
 
 // processDelete applies a Delete operation.
-func processDelete(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.DeleteOp) error {
-	return deleteEntity(db, sdb, j, common.Address(op.EntityKey[:20]))
+func processDelete(cs *CacheStore, op *types.DeleteOp) error {
+	return deleteEntity(cs, common.Address(op.EntityKey[:20]))
 }
 
-func deleteEntity(db ethdb.Database, sdb *state.StateDB, j *blockJournal, addr common.Address) error {
-	code := sdb.GetCode(addr)
-	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", addr)
-	}
-	entity, err := decodeEntity(code)
+func deleteEntity(cs *CacheStore, addr common.Address) error {
+	entity, err := cs.getEntity(addr)
 	if err != nil {
-		return fmt.Errorf("decode entity: %w", err)
+		return err
 	}
 
-	// Resolve entity ID.
-	idBytes, err := db.Get(addrKey(addr))
+	idBytes, err := cs.stagingDB.Get(addrKey(addr))
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
 	}
 	entityID := decodeUint64(idBytes)
 
-	// Remove from all annotation bitmaps.
-	for _, pair := range allAnnotations(entity) {
-		if err := bitmapRemove(db, sdb, j, pair.key, pair.val, entityID); err != nil {
+	for _, pair := range allAnnotations(*entity) {
+		if err := bitmapRemove(cs, pair.key, pair.val, entityID); err != nil {
 			return fmt.Errorf("bitmap remove %q: %w", pair.key, err)
 		}
 	}
 
-	// Clear trie-committed ID slot (reverts automatically on reorg).
-	clearIDSlot(sdb, entityID)
+	clearIDSlot(cs.stateDB, entityID)
 
-	// SetCode(nil) → codeHash = emptyCodeHash → EIP-161-empty → pruned by Finalise.
-	// arkiv_id and arkiv_addr are left as tombstones and NOT journaled.
-	sdb.SetCode(addr, nil, tracing.CodeChangeUnspecified)
+	// Remove from dirty cache and clear trie code immediately so subsequent ops
+	// in the same block see the entity as absent.
+	delete(cs.dirtyEntities, addr)
+	cs.stateDB.SetCode(addr, nil, tracing.CodeChangeUnspecified)
 	return nil
 }
 
 // processExtend applies an Extend operation.
-func processExtend(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.ExtendOp) error {
+func processExtend(cs *CacheStore, op *types.ExtendOp) error {
 	addr := common.Address(op.EntityKey[:20])
-	code := sdb.GetCode(addr)
-	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", addr)
-	}
-	entity, err := decodeEntity(code)
+
+	entity, err := cs.getEntity(addr)
 	if err != nil {
-		return fmt.Errorf("decode entity: %w", err)
+		return err
 	}
 
-	idBytes, err := db.Get(addrKey(addr))
+	idBytes, err := cs.stagingDB.Get(addrKey(addr))
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
 	}
 	entityID := decodeUint64(idBytes)
 
-	// Update $expiration bitmap: remove old value, add new value.
-	if err := bitmapRemove(db, sdb, j, "$expiration", numericVal(entity.ExpiresAt), entityID); err != nil {
+	if err := bitmapRemove(cs, "$expiration", numericVal(entity.ExpiresAt), entityID); err != nil {
 		return err
 	}
 	entity.ExpiresAt = op.NewExpiresAt
-	if err := bitmapAdd(db, sdb, j, "$expiration", numericVal(entity.ExpiresAt), entityID); err != nil {
+	if err := bitmapAdd(cs, "$expiration", numericVal(entity.ExpiresAt), entityID); err != nil {
 		return err
 	}
 
-	data, _, err := encodeEntity(entity)
-	if err != nil {
-		return err
-	}
-	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }
 
 // processChangeOwner applies a ChangeOwner operation.
-func processChangeOwner(db ethdb.Database, sdb *state.StateDB, j *blockJournal, op *types.ChangeOwnerOp) error {
+func processChangeOwner(cs *CacheStore, op *types.ChangeOwnerOp) error {
 	addr := common.Address(op.EntityKey[:20])
-	code := sdb.GetCode(addr)
-	if len(code) == 0 {
-		return fmt.Errorf("entity %s not found", addr)
-	}
-	entity, err := decodeEntity(code)
+
+	entity, err := cs.getEntity(addr)
 	if err != nil {
-		return fmt.Errorf("decode entity: %w", err)
+		return err
 	}
 
-	idBytes, err := db.Get(addrKey(addr))
+	idBytes, err := cs.stagingDB.Get(addrKey(addr))
 	if err != nil {
 		return fmt.Errorf("entity ID not found: %w", err)
 	}
 	entityID := decodeUint64(idBytes)
 
-	// Update $owner bitmap: remove old owner, add new owner.
-	if err := bitmapRemove(db, sdb, j, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
+	if err := bitmapRemove(cs, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
 		return err
 	}
 	entity.Owner = op.NewOwner
-	if err := bitmapAdd(db, sdb, j, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
+	if err := bitmapAdd(cs, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
 		return err
 	}
 
-	data, _, err := encodeEntity(entity)
-	if err != nil {
-		return err
-	}
-	sdb.SetCode(addr, data, tracing.CodeChangeUnspecified)
 	return nil
 }
