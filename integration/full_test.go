@@ -27,7 +27,7 @@ var (
 	iAddr1 = common.Address(iKey1[:20])
 	iAddr2 = common.Address(iKey2[:20])
 	iAddr3 = common.Address(iKey3[:20])
-	iAddr4 = common.Address(iKey4[:20])
+
 
 	iOwner1 = common.HexToAddress("0xaaaa000000000000000000000000000000000001")
 	iOwner2 = common.HexToAddress("0xaaaa000000000000000000000000000000000002")
@@ -111,10 +111,6 @@ func mkBlockRefWithHash(num uint64, hash common.Hash) types.ArkivBlockRef {
 
 func strAnnot(key, val string) types.Annotation {
 	return types.Annotation{Key: key, StringValue: &val}
-}
-
-func numAnnot(key string, val uint64) types.Annotation {
-	return types.Annotation{Key: key, NumericValue: &val}
 }
 
 // ----- test environment -----

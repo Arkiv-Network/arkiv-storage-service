@@ -3,7 +3,6 @@ package store
 import (
 	"encoding/binary"
 	"fmt"
-	"strings"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/ethereum/go-ethereum/common"
@@ -286,17 +285,4 @@ func globMatch(pattern, s string) bool {
 		}
 	}
 	return len(s) == 0
-}
-
-// isPrefixGlob reports whether pattern is a simple "prefix*" glob with no other
-// wildcards. Returns the prefix if so.
-func isPrefixGlob(pattern string) (string, bool) {
-	if !strings.HasSuffix(pattern, "*") {
-		return "", false
-	}
-	prefix := pattern[:len(pattern)-1]
-	if strings.ContainsAny(prefix, "*?") {
-		return "", false
-	}
-	return prefix, true
 }

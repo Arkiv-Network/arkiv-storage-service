@@ -1,0 +1,152 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"github.com/Arkiv-Network/arkiv-storage-service/chain"
+	"github.com/Arkiv-Network/arkiv-storage-service/query"
+	"github.com/Arkiv-Network/arkiv-storage-service/store"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/ethdb/pebble"
+	"gopkg.in/yaml.v2"
+)
+
+const configFileName = "config.yaml"
+
+// config holds all tuneable parameters. YAML keys match the flag names so a
+// single struct works for both the file and the CLI override logic.
+type config struct {
+	ChainAddr string `yaml:"chain-addr"`
+	QueryAddr string `yaml:"query-addr"`
+}
+
+func defaultDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".arkiv-storaged"
+	}
+	return filepath.Join(home, ".arkiv-storaged")
+}
+
+// loadConfig reads <dataDir>/config.json. Missing file is not an error.
+func loadConfig(dataDir string) (config, error) {
+	var cfg config
+	path := filepath.Join(dataDir, configFileName)
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return cfg, nil
+	}
+	if err != nil {
+		return cfg, err
+	}
+	defer f.Close()
+	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+func main() {
+	// Register flags with their hard-coded defaults.
+	chainAddr := flag.String("chain-addr", ":2704", "address for the chain ingest JSON-RPC server (arkiv-op-reth → storaged)")
+	queryAddr := flag.String("query-addr", ":2705", "address for the query JSON-RPC server (SDK → storaged)")
+	dataDir := flag.String("data-dir", defaultDataDir(), "path to the data directory (PebbleDB + config.yaml)")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `arkiv-storaged — Arkiv entity storage daemon
+
+Maintains a queryable index of Arkiv entity state. It receives committed and
+reverted blocks from the arkiv-op-reth ExEx via a private chain ingest server,
+and serves entity queries to SDK clients via a separate query server.
+
+Usage:
+  arkiv-storaged [flags]
+
+Flags:
+`)
+		flag.PrintDefaults()
+	}
+
+	flag.Parse()
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	// Load config file from the data dir resolved so far.
+	// CLI flags always win, so we only apply file values for flags the user
+	// did not explicitly pass.
+	cfg, err := loadConfig(*dataDir)
+	if err != nil {
+		log.Error("failed to read config file", "path", filepath.Join(*dataDir, configFileName), "err", err)
+		os.Exit(1)
+	}
+
+	// Build the set of flags that were explicitly provided on the command line.
+	explicit := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
+	// Apply config-file values for flags that were not explicitly set.
+	if !explicit["chain-addr"] && cfg.ChainAddr != "" {
+		*chainAddr = cfg.ChainAddr
+	}
+	if !explicit["query-addr"] && cfg.QueryAddr != "" {
+		*queryAddr = cfg.QueryAddr
+	}
+
+	// Open the database.
+	log.Info("opening pebble database", "path", *dataDir)
+	kv, err := pebble.New(*dataDir, 128, 512, "arkiv", false)
+	if err != nil {
+		log.Error("failed to open pebble database", "err", err)
+		os.Exit(1)
+	}
+	s := store.New(rawdb.NewDatabase(kv))
+
+	// Build the two HTTP servers.
+	chainSrv, err := chain.New(log, s)
+	if err != nil {
+		log.Error("failed to create chain server", "err", err)
+		os.Exit(1)
+	}
+	querySrv, err := query.New(s)
+	if err != nil {
+		log.Error("failed to create query server", "err", err)
+		os.Exit(1)
+	}
+
+	chainHTTP := &http.Server{Addr: *chainAddr, Handler: chainSrv}
+	queryHTTP := &http.Server{Addr: *queryAddr, Handler: querySrv}
+
+	// Start both servers.
+	go func() {
+		log.Info("chain ingest server listening", "addr", *chainAddr)
+		if err := chainHTTP.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Error("chain server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+	go func() {
+		log.Info("query server listening", "addr", *queryAddr)
+		if err := queryHTTP.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Error("query server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for SIGINT or SIGTERM.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	log.Info("shutting down")
+	chainHTTP.Shutdown(context.Background()) //nolint:errcheck
+	queryHTTP.Shutdown(context.Background()) //nolint:errcheck
+}
