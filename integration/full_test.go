@@ -3,19 +3,47 @@ package integration_test
 import (
 	"encoding/binary"
 	"encoding/json"
-	"log/slog"
-	"net/http/httptest"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
 	"sort"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Arkiv-Network/arkiv-storage-service/chain"
 	"github.com/Arkiv-Network/arkiv-storage-service/query"
-	"github.com/Arkiv-Network/arkiv-storage-service/store"
 	"github.com/Arkiv-Network/arkiv-storage-service/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
 )
+
+var binaryPath string
+
+func TestMain(m *testing.M) {
+	tmp, err := os.CreateTemp("", "arkiv-storaged-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create temp file: %v\n", err)
+		os.Exit(1)
+	}
+	tmp.Close()
+	binaryPath = tmp.Name()
+
+	build := exec.Command("go", "build", "-o", binaryPath, "../cmd/arkiv-storaged")
+	build.Stdout = os.Stderr
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "build arkiv-storaged: %v\n", err)
+		os.Remove(binaryPath)
+		os.Exit(1)
+	}
+
+	code := m.Run()
+	os.Remove(binaryPath)
+	os.Exit(code)
+}
 
 // Entity keys whose first 20 bytes are the entity address.
 var (
@@ -120,30 +148,66 @@ type testEnv struct {
 	q *rpc.Client // query client
 }
 
+// freePort returns a free TCP port on localhost.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port
+}
+
+// waitReady blocks until the TCP address accepts connections, or the test fails.
+func waitReady(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("server at %s did not become ready within 10s", addr)
+}
+
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
-	s := store.NewMemory()
+	chainPort := freePort(t)
+	queryPort := freePort(t)
 
-	chainSrv, err := chain.New(slog.Default(), s)
-	if err != nil {
-		t.Fatalf("chain.New: %v", err)
+	cmd := exec.Command(binaryPath,
+		"--chain-addr", fmt.Sprintf("127.0.0.1:%d", chainPort),
+		"--query-addr", fmt.Sprintf("127.0.0.1:%d", queryPort),
+		"--data-dir", t.TempDir(),
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start arkiv-storaged: %v", err)
 	}
-	chainTS := httptest.NewServer(chainSrv)
-	t.Cleanup(chainTS.Close)
-	chainClient, err := rpc.Dial(chainTS.URL)
+	t.Cleanup(func() {
+		cmd.Process.Signal(syscall.SIGTERM) //nolint:errcheck
+		cmd.Wait()                          //nolint:errcheck
+	})
+
+	chainAddr := fmt.Sprintf("127.0.0.1:%d", chainPort)
+	queryAddr := fmt.Sprintf("127.0.0.1:%d", queryPort)
+	waitReady(t, chainAddr)
+	waitReady(t, queryAddr)
+
+	chainClient, err := rpc.Dial("http://" + chainAddr)
 	if err != nil {
 		t.Fatalf("rpc.Dial chain: %v", err)
 	}
 	t.Cleanup(chainClient.Close)
 
-	querySrv, err := query.New(s)
-	if err != nil {
-		t.Fatalf("query.New: %v", err)
-	}
-	queryTS := httptest.NewServer(querySrv)
-	t.Cleanup(queryTS.Close)
-	queryClient, err := rpc.Dial(queryTS.URL)
+	queryClient, err := rpc.Dial("http://" + queryAddr)
 	if err != nil {
 		t.Fatalf("rpc.Dial query: %v", err)
 	}
