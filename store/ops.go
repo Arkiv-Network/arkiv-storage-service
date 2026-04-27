@@ -156,11 +156,18 @@ func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	}
 	entityID := decodeUint64(idBytes)
 
+	// expiresAt == 0 means the operation did not supply a new expiry
+	// (the CLI sends 0 for updates). Preserve the entity's current expiry.
+	newExpiresAt := uint64(op.ExpiresAt)
+	if newExpiresAt == 0 {
+		newExpiresAt = old.ExpiresAt
+	}
+
 	updated := &Entity{
 		Payload:        []byte(op.Payload),
 		Owner:          old.Owner,
 		Creator:        old.Creator,
-		ExpiresAt:      uint64(op.ExpiresAt),
+		ExpiresAt:      newExpiresAt,
 		CreatedAtBlock: old.CreatedAtBlock,
 		ContentType:    op.ContentType,
 		Key:            old.Key,
