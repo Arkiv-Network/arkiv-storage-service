@@ -28,14 +28,19 @@ var (
 )
 
 // makeBlock builds an ArkivBlock from the given arguments.
+// All ops are placed in a single transaction with testSender as the sender.
 func makeBlock(number uint64, hash, parentHash common.Hash, ops ...types.ArkivOperation) types.ArkivBlock {
+	var txs []types.ArkivTransaction
+	if len(ops) > 0 {
+		txs = []types.ArkivTransaction{{Sender: testSender, Operations: ops}}
+	}
 	return types.ArkivBlock{
 		Header: types.ArkivBlockHeader{
 			Number:     hexutil.Uint64(number),
 			Hash:       hash,
 			ParentHash: parentHash,
 		},
-		Operations: ops,
+		Transactions: txs,
 	}
 }
 
@@ -44,10 +49,9 @@ func makeCreate(entityKey common.Hash, sender, owner common.Address, payload, co
 	return types.ArkivOperation{
 		Create: &types.CreateOp{
 			EntityKey:   entityKey,
-			Sender:      sender,
 			Payload:     hexutil.Bytes(payload),
 			ContentType: contentType,
-			ExpiresAt:   expiresAt,
+			ExpiresAt:   hexutil.Uint64(expiresAt),
 			Owner:       owner,
 		},
 	}
@@ -182,10 +186,9 @@ func TestUpdateEntity(t *testing.T) {
 	block1 := makeBlock(1, testHash1, common.Hash{},
 		types.ArkivOperation{Create: &types.CreateOp{
 			EntityKey:   testKey1,
-			Sender:      testSender,
 			Payload:     hexutil.Bytes("original"),
 			ContentType: "text/plain",
-			ExpiresAt:   500,
+			ExpiresAt:   hexutil.Uint64(500),
 			Owner:       testOwner1,
 			Annotations: []types.Annotation{{Key: "type", StringValue: &strVal}},
 		}},
@@ -200,7 +203,7 @@ func TestUpdateEntity(t *testing.T) {
 			EntityKey:   testKey1,
 			Payload:     hexutil.Bytes("updated"),
 			ContentType: "text/plain",
-			ExpiresAt:   600,
+			ExpiresAt:   hexutil.Uint64(600),
 			Annotations: []types.Annotation{{Key: "type", StringValue: &newStrVal}},
 		}},
 	)
@@ -284,7 +287,7 @@ func TestExtend(t *testing.T) {
 	}
 
 	block2 := makeBlock(2, testHash2, testHash1,
-		types.ArkivOperation{Extend: &types.ExtendOp{EntityKey: testKey1, NewExpiresAt: 200}},
+		types.ArkivOperation{Extend: &types.ExtendOp{EntityKey: testKey1, ExpiresAt: hexutil.Uint64(200)}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
 		t.Fatalf("ProcessBlock extend: %v", err)

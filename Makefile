@@ -10,7 +10,7 @@ build:
 install:
 	go install $(CMD)
 
-test:
+test: build
 	go test ./...
 
 lint:

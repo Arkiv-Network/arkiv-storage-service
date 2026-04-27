@@ -27,7 +27,7 @@ func TestStagingOverlay_TwoOpsOnSameBitmap(t *testing.T) {
 			Owner:       testOwner1,
 			Payload:     hexutil.Bytes("p1"),
 			ContentType: "text/plain",
-			ExpiresAt:   100,
+			ExpiresAt:   hexutil.Uint64(100),
 			Annotations: []types.Annotation{{Key: "type", StringValue: &noteStr}},
 		}},
 		types.ArkivOperation{Create: &types.CreateOp{
@@ -36,7 +36,7 @@ func TestStagingOverlay_TwoOpsOnSameBitmap(t *testing.T) {
 			Owner:       testOwner1,
 			Payload:     hexutil.Bytes("p2"),
 			ContentType: "text/plain",
-			ExpiresAt:   100,
+			ExpiresAt:   hexutil.Uint64(100),
 			Annotations: []types.Annotation{{Key: "type", StringValue: &noteStr}},
 		}},
 	)

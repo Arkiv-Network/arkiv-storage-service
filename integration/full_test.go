@@ -76,11 +76,10 @@ func bh(n uint64) common.Hash {
 func mkCreate(key common.Hash, owner common.Address, payload, ct string, expiresAt uint64, annots ...types.Annotation) types.ArkivOperation {
 	return types.ArkivOperation{Create: &types.CreateOp{
 		EntityKey:   key,
-		Sender:      iSender,
 		Owner:       owner,
 		Payload:     hexutil.Bytes(payload),
 		ContentType: ct,
-		ExpiresAt:   expiresAt,
+		ExpiresAt:   hexutil.Uint64(expiresAt),
 		Annotations: annots,
 	}}
 }
@@ -90,7 +89,7 @@ func mkUpdate(key common.Hash, payload, ct string, expiresAt uint64, annots ...t
 		EntityKey:   key,
 		Payload:     hexutil.Bytes(payload),
 		ContentType: ct,
-		ExpiresAt:   expiresAt,
+		ExpiresAt:   hexutil.Uint64(expiresAt),
 		Annotations: annots,
 	}}
 }
@@ -100,7 +99,7 @@ func mkDelete(key common.Hash) types.ArkivOperation {
 }
 
 func mkExtend(key common.Hash, newExpiresAt uint64) types.ArkivOperation {
-	return types.ArkivOperation{Extend: &types.ExtendOp{EntityKey: key, NewExpiresAt: newExpiresAt}}
+	return types.ArkivOperation{Extend: &types.ExtendOp{EntityKey: key, ExpiresAt: hexutil.Uint64(newExpiresAt)}}
 }
 
 func mkChangeOwner(key common.Hash, newOwner common.Address) types.ArkivOperation {
@@ -108,24 +107,32 @@ func mkChangeOwner(key common.Hash, newOwner common.Address) types.ArkivOperatio
 }
 
 func mkBlock(num uint64, ops ...types.ArkivOperation) types.ArkivBlock {
+	var txs []types.ArkivTransaction
+	if len(ops) > 0 {
+		txs = []types.ArkivTransaction{{Sender: iSender, Operations: ops}}
+	}
 	return types.ArkivBlock{
 		Header: types.ArkivBlockHeader{
 			Number:     hexutil.Uint64(num),
 			Hash:       bh(num),
 			ParentHash: bh(num - 1),
 		},
-		Operations: ops,
+		Transactions: txs,
 	}
 }
 
 func mkBlockWithHash(num uint64, hash, parent common.Hash, ops ...types.ArkivOperation) types.ArkivBlock {
+	var txs []types.ArkivTransaction
+	if len(ops) > 0 {
+		txs = []types.ArkivTransaction{{Sender: iSender, Operations: ops}}
+	}
 	return types.ArkivBlock{
 		Header: types.ArkivBlockHeader{
 			Number:     hexutil.Uint64(num),
 			Hash:       hash,
 			ParentHash: parent,
 		},
-		Operations: ops,
+		Transactions: txs,
 	}
 }
 

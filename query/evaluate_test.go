@@ -27,13 +27,17 @@ var (
 )
 
 func makeQBlock(number uint64, hash, parent common.Hash, ops ...types.ArkivOperation) types.ArkivBlock {
+	var txs []types.ArkivTransaction
+	if len(ops) > 0 {
+		txs = []types.ArkivTransaction{{Sender: qSender, Operations: ops}}
+	}
 	return types.ArkivBlock{
 		Header: types.ArkivBlockHeader{
 			Number:     hexutil.Uint64(number),
 			Hash:       hash,
 			ParentHash: parent,
 		},
-		Operations: ops,
+		Transactions: txs,
 	}
 }
 
@@ -41,10 +45,9 @@ func makeQCreate(entityKey common.Hash, sender, owner common.Address, contentTyp
 	return types.ArkivOperation{
 		Create: &types.CreateOp{
 			EntityKey:   entityKey,
-			Sender:      sender,
 			Payload:     hexutil.Bytes("payload"),
 			ContentType: contentType,
-			ExpiresAt:   expiresAt,
+			ExpiresAt:   hexutil.Uint64(expiresAt),
 			Owner:       owner,
 			Annotations: annots,
 		},

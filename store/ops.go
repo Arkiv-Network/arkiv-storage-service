@@ -69,6 +69,8 @@ func applyOp(cs *CacheStore, op types.ArkivOperation) error {
 		return processExtend(cs, op.Extend)
 	case op.ChangeOwner != nil:
 		return processChangeOwner(cs, op.ChangeOwner)
+	case op.Expire != nil:
+		return processExpire(cs, op.Expire)
 	default:
 		return fmt.Errorf("empty operation")
 	}
@@ -115,7 +117,7 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 		Payload:        []byte(op.Payload),
 		Owner:          op.Owner,
 		Creator:        op.Sender,
-		ExpiresAt:      op.ExpiresAt,
+		ExpiresAt:      uint64(op.ExpiresAt),
 		CreatedAtBlock: cs.blockNumber,
 		ContentType:    op.ContentType,
 		Key:            op.EntityKey,
@@ -158,7 +160,7 @@ func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 		Payload:        []byte(op.Payload),
 		Owner:          old.Owner,
 		Creator:        old.Creator,
-		ExpiresAt:      op.ExpiresAt,
+		ExpiresAt:      uint64(op.ExpiresAt),
 		CreatedAtBlock: old.CreatedAtBlock,
 		ContentType:    op.ContentType,
 		Key:            old.Key,
@@ -243,12 +245,18 @@ func processExtend(cs *CacheStore, op *types.ExtendOp) error {
 	if err := bitmapRemove(cs, "$expiration", numericVal(entity.ExpiresAt), entityID); err != nil {
 		return err
 	}
-	entity.ExpiresAt = op.NewExpiresAt
+	entity.ExpiresAt = uint64(op.ExpiresAt)
 	if err := bitmapAdd(cs, "$expiration", numericVal(entity.ExpiresAt), entityID); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// processExpire removes an entity that has passed its expiration block.
+// Semantically identical to processDelete from the store's perspective.
+func processExpire(cs *CacheStore, op *types.ExpireOp) error {
+	return deleteEntity(cs, common.Address(op.EntityKey[:20]))
 }
 
 // processChangeOwner applies a ChangeOwner operation.

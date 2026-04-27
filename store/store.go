@@ -126,10 +126,17 @@ func (s *Store) processBlock(block types.ArkivBlock) (common.Hash, error) {
 
 	initSystemAccount(cs.stateDB)
 
-	for i, op := range block.Operations {
-		if err := cs.ApplyOp(op); err != nil {
-			cs.Discard()
-			return common.Hash{}, fmt.Errorf("op %d: %w", i, err)
+	for _, tx := range block.Transactions {
+		for i, op := range tx.Operations {
+			// Sender lives at the transaction level on the wire; inject it
+			// into CreateOp so processCreate can set the entity's Creator.
+			if op.Create != nil {
+				op.Create.Sender = tx.Sender
+			}
+			if err := cs.ApplyOp(op); err != nil {
+				cs.Discard()
+				return common.Hash{}, fmt.Errorf("tx %s op %d: %w", tx.Hash, i, err)
+			}
 		}
 	}
 

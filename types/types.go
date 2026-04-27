@@ -23,11 +23,19 @@ type ArkivBlockHeader struct {
 	ParentHash common.Hash    `json:"parentHash"`
 }
 
-// ArkivBlock is a sealed block containing only the Arkiv operations extracted
-// from successful EntityRegistry transactions. Blocks with no Arkiv activity
-// are still forwarded with an empty Operations list.
+// ArkivBlock is a sealed block containing only the Arkiv transactions extracted
+// from successful EntityRegistry calls. Blocks with no Arkiv activity are still
+// forwarded with an empty Transactions list.
 type ArkivBlock struct {
-	Header     ArkivBlockHeader `json:"header"`
+	Header       ArkivBlockHeader   `json:"header"`
+	Transactions []ArkivTransaction `json:"transactions"`
+}
+
+// ArkivTransaction is a single EntityRegistry call with its decoded operations.
+type ArkivTransaction struct {
+	Hash       common.Hash      `json:"hash"`
+	Index      uint32           `json:"index"`
+	Sender     common.Address   `json:"sender"`
 	Operations []ArkivOperation `json:"operations"`
 }
 
@@ -37,7 +45,7 @@ type ArkivBlockRef struct {
 	Hash   common.Hash    `json:"hash"`
 }
 
-// ArkivOperation is a discriminated union of the five Arkiv operation types.
+// ArkivOperation is a discriminated union of the Arkiv operation types.
 // Exactly one of the pointer fields is non-nil after unmarshaling.
 type ArkivOperation struct {
 	Create      *CreateOp
@@ -45,6 +53,7 @@ type ArkivOperation struct {
 	Delete      *DeleteOp
 	Extend      *ExtendOp
 	ChangeOwner *ChangeOwnerOp
+	Expire      *ExpireOp
 }
 
 func (o ArkivOperation) MarshalJSON() ([]byte, error) {
@@ -78,7 +87,13 @@ func (o ArkivOperation) MarshalJSON() ([]byte, error) {
 			Type string `json:"type"`
 			*ChangeOwnerOp
 		}
-		return json.Marshal(T{Type: "changeOwner", ChangeOwnerOp: o.ChangeOwner})
+		return json.Marshal(T{Type: "transfer", ChangeOwnerOp: o.ChangeOwner})
+	case o.Expire != nil:
+		type T struct {
+			Type string `json:"type"`
+			*ExpireOp
+		}
+		return json.Marshal(T{Type: "expire", ExpireOp: o.Expire})
 	default:
 		return nil, fmt.Errorf("ArkivOperation: no operation set")
 	}
@@ -104,9 +119,12 @@ func (o *ArkivOperation) UnmarshalJSON(data []byte) error {
 	case "extend":
 		o.Extend = new(ExtendOp)
 		return json.Unmarshal(data, o.Extend)
-	case "changeOwner":
+	case "transfer", "changeOwner":
 		o.ChangeOwner = new(ChangeOwnerOp)
 		return json.Unmarshal(data, o.ChangeOwner)
+	case "expire":
+		o.Expire = new(ExpireOp)
+		return json.Unmarshal(data, o.Expire)
 	default:
 		return fmt.Errorf("unknown operation type %q", typed.Type)
 	}
@@ -118,20 +136,25 @@ type CreateOp struct {
 	// Forwarded directly from the EntityOperation log by the ExEx.
 	// The trie account address is derived as EntityKey[:20].
 	EntityKey   common.Hash    `json:"entityKey"`
-	Sender      common.Address `json:"sender"`
+	// Sender is populated from ArkivTransaction.Sender by processBlock; it is
+	// not part of the wire format (the ExEx places sender at the tx level).
+	Sender      common.Address `json:"-"`
 	Payload     hexutil.Bytes  `json:"payload"`
 	ContentType string         `json:"contentType"`
-	ExpiresAt   uint64         `json:"expiresAt"`
+	// ExpiresAt is serialized as a hex string by the Rust ExEx ("0x...").
+	ExpiresAt   hexutil.Uint64 `json:"expiresAt"`
 	Owner       common.Address `json:"owner"`
-	Annotations []Annotation   `json:"annotations"`
+	// Annotations are called "attributes" on the wire (Rust field name).
+	Annotations []Annotation   `json:"attributes"`
 }
 
 type UpdateOp struct {
-	EntityKey   common.Hash   `json:"entityKey"`
-	Payload     hexutil.Bytes `json:"payload"`
-	ContentType string        `json:"contentType"`
-	ExpiresAt   uint64        `json:"expiresAt"`
-	Annotations []Annotation  `json:"annotations"`
+	EntityKey   common.Hash    `json:"entityKey"`
+	Payload     hexutil.Bytes  `json:"payload"`
+	ContentType string         `json:"contentType"`
+	ExpiresAt   hexutil.Uint64 `json:"expiresAt"`
+	// Annotations are called "attributes" on the wire (Rust field name).
+	Annotations []Annotation   `json:"attributes"`
 }
 
 type DeleteOp struct {
@@ -139,11 +162,18 @@ type DeleteOp struct {
 }
 
 type ExtendOp struct {
-	EntityKey    common.Hash `json:"entityKey"`
-	NewExpiresAt uint64      `json:"newExpiresAt"`
+	EntityKey common.Hash    `json:"entityKey"`
+	// ExpiresAt is the new absolute expiration block, serialized as hex ("0x...").
+	ExpiresAt hexutil.Uint64 `json:"expiresAt"`
 }
 
 type ChangeOwnerOp struct {
 	EntityKey common.Hash    `json:"entityKey"`
 	NewOwner  common.Address `json:"newOwner"`
+}
+
+// ExpireOp removes an entity that has passed its expiration block.
+// Wire type tag: "expire".
+type ExpireOp struct {
+	EntityKey common.Hash `json:"entityKey"`
 }
