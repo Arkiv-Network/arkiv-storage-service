@@ -372,7 +372,7 @@ func TestRevertBlock(t *testing.T) {
 		t.Fatalf("ProcessBlock: %v", err)
 	}
 
-	if err := s.RevertBlock(types.ArkivBlockRef{Number: hexutil.Uint64(1), Hash: testHash1}); err != nil {
+	if _, err := s.RevertBlock(types.ArkivBlockRef{Number: hexutil.Uint64(1), Hash: testHash1}); err != nil {
 		t.Fatalf("RevertBlock: %v", err)
 	}
 
@@ -430,7 +430,7 @@ func TestReorgTwoBlocks(t *testing.T) {
 	}
 
 	// Revert block 2: B is gone, A is still there.
-	if err := s.RevertBlock(types.ArkivBlockRef{Number: hexutil.Uint64(2), Hash: testHash2}); err != nil {
+	if _, err := s.RevertBlock(types.ArkivBlockRef{Number: hexutil.Uint64(2), Hash: testHash2}); err != nil {
 		t.Fatalf("RevertBlock 2: %v", err)
 	}
 	if s.headNumber != 1 || s.headHash != testHash1 {
@@ -451,7 +451,7 @@ func TestReorgTwoBlocks(t *testing.T) {
 	}
 
 	// Revert block 1: A is also gone.
-	if err := s.RevertBlock(types.ArkivBlockRef{Number: hexutil.Uint64(1), Hash: testHash1}); err != nil {
+	if _, err := s.RevertBlock(types.ArkivBlockRef{Number: hexutil.Uint64(1), Hash: testHash1}); err != nil {
 		t.Fatalf("RevertBlock 1: %v", err)
 	}
 	if s.headNumber != 0 {

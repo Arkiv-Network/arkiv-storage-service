@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/Arkiv-Network/arkiv-storage-service/store"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -17,41 +18,39 @@ type handler struct {
 	store *store.Store
 }
 
-func (h *handler) CommitChain(_ context.Context, req CommitChainRequest) error {
+func (h *handler) CommitChain(_ context.Context, req CommitChainRequest) (*StateRootResponse, error) {
+	var stateRoot common.Hash
 	for _, block := range req.Blocks {
-		stateRoot, err := h.store.ProcessBlock(block)
+		var err error
+		stateRoot, err = h.store.ProcessBlock(block)
 		if err != nil {
-			return fmt.Errorf("process block %d: %w", block.Header.Number, err)
+			return nil, fmt.Errorf("process block %d: %w", block.Header.Number, err)
 		}
 		h.log.Info("commitChain", "block", block.Header.Number, "stateRoot", stateRoot)
 	}
-	return nil
+	return &StateRootResponse{StateRoot: stateRoot}, nil
 }
 
-func (h *handler) Revert(_ context.Context, req RevertRequest) error {
+func (h *handler) Revert(_ context.Context, req RevertRequest) (*StateRootResponse, error) {
+	var stateRoot common.Hash
 	for _, ref := range req.Blocks {
-		if err := h.store.RevertBlock(ref); err != nil {
-			return fmt.Errorf("revert block %d: %w", ref.Number, err)
+		var err error
+		stateRoot, err = h.store.RevertBlock(ref)
+		if err != nil {
+			return nil, fmt.Errorf("revert block %d: %w", ref.Number, err)
 		}
-		h.log.Info("revert", "block", ref.Number)
+		h.log.Info("revert", "block", ref.Number, "stateRoot", stateRoot)
 	}
-	return nil
+	return &StateRootResponse{StateRoot: stateRoot}, nil
 }
 
-func (h *handler) Reorg(_ context.Context, req ReorgRequest) error {
-	for _, ref := range req.RevertedBlocks {
-		if err := h.store.RevertBlock(ref); err != nil {
-			return fmt.Errorf("revert block %d: %w", ref.Number, err)
-		}
+func (h *handler) Reorg(_ context.Context, req ReorgRequest) (*StateRootResponse, error) {
+	stateRoot, err := h.store.Reorg(req.RevertedBlocks, req.NewBlocks)
+	if err != nil {
+		return nil, err
 	}
-	for _, block := range req.NewBlocks {
-		stateRoot, err := h.store.ProcessBlock(block)
-		if err != nil {
-			return fmt.Errorf("process block %d: %w", block.Header.Number, err)
-		}
-		h.log.Info("reorg: committed", "block", block.Header.Number, "stateRoot", stateRoot)
-	}
-	return nil
+	h.log.Info("reorg", "stateRoot", stateRoot)
+	return &StateRootResponse{StateRoot: stateRoot}, nil
 }
 
 // Server is an HTTP server exposing the arkiv chain ingest JSON-RPC 2.0 API.

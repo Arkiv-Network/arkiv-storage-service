@@ -1,6 +1,9 @@
 package chain
 
-import "github.com/Arkiv-Network/arkiv-storage-service/types"
+import (
+	"github.com/Arkiv-Network/arkiv-storage-service/types"
+	"github.com/ethereum/go-ethereum/common"
+)
 
 // CommitChainRequest is the parameter object for arkiv_commitChain.
 type CommitChainRequest struct {
@@ -16,4 +19,9 @@ type RevertRequest struct {
 type ReorgRequest struct {
 	RevertedBlocks []types.ArkivBlockRef `json:"revertedBlocks"`
 	NewBlocks      []types.ArkivBlock    `json:"newBlocks"`
+}
+
+// StateRootResponse is returned by all chain ingest methods.
+type StateRootResponse struct {
+	StateRoot common.Hash `json:"stateRoot"`
 }

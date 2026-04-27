@@ -60,7 +60,7 @@
 
 ---
 
-> **Design decision.** The EntityDB does not currently submit `arkiv_stateRoot` to the `EntityRegistry` contract. The EntityDB and op-reth run as separate, independent processes. The EntityDB computes a state root internally after each block, but that root is not anchored on-chain. This will remain the case until the EntityDB has demonstrated sufficient determinism — expected to be around one year of production operation. On-chain commitment and the full verifiability proof chain described in §2 are planned for a future phase.
+> **Design decision.** The storage service does not currently submit `arkiv_stateRoot` to the `EntityRegistry` contract. The storage service and arkiv-op-reth run as separate, independent processes. The storage service computes a state root after each block and returns it to the ExEx, but that root is not yet anchored on-chain. This will remain the case until the storage service has demonstrated sufficient determinism — expected to be around one year of production operation. On-chain commitment and the full verifiability proof chain described in §2 are planned for a future phase.
 >
 > In the current phase, **partial verification** is available: the `EntityRegistry` contract stores a `coreHash` commitment for every live entity (§2), which clients can use to verify that the payload and attributes returned by the EntityDB are authentic. Query result completeness (i.e. that the result set contains all matching entities) cannot be verified in the current phase.
 
@@ -146,7 +146,7 @@ SDK / clients
 1. A client submits a standard L3 transaction calling `EntityRegistry.execute(Op[] ops)`. The contract validates each operation and emits a log per operation. The resulting storage changes are committed in the L3 block's `stateRoot` when the block is sealed.
 2. Reth commits the sealed block. The ExEx receives a `ChainCommitted { chain }` notification.
 3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `entityKey` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `operations` list.
-4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block and computes `arkiv_stateRoot` internally, but does not return it to the ExEx and the ExEx does not submit it anywhere.
+4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block, computes `arkiv_stateRoot`, and returns it in the response. The ExEx does not currently submit it anywhere.
 5. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
 
 On `ChainReverted`, the ExEx sends `arkiv_revert` with block identifiers only. The EntityDB replays its journal in reverse. On `ChainReorged`, the ExEx sends `arkiv_reorg` atomically.
@@ -397,7 +397,12 @@ Apply a contiguous sequence of `ArkivBlock`s to the canonical head. Blocks must 
 }
 ```
 
-**Response:** `{}` on success, JSON-RPC error on failure.
+**Response (success):**
+```json
+{ "result": { "stateRoot": "0x7f8e..." } }
+```
+
+`stateRoot` is the `arkiv_stateRoot` after applying the last block in the batch. JSON-RPC error on failure.
 
 ### arkiv_revert
 
@@ -417,7 +422,12 @@ Revert a contiguous sequence of blocks from the canonical head back to the commo
 }
 ```
 
-**Response:** `{}` on success, JSON-RPC error on failure.
+**Response (success):**
+```json
+{ "result": { "stateRoot": "0xaaa..." } }
+```
+
+`stateRoot` is the `arkiv_stateRoot` of the new canonical head after reverting. JSON-RPC error on failure.
 
 ### arkiv_reorg
 
@@ -446,7 +456,12 @@ Atomically revert a set of blocks and commit a new set. Semantically equivalent 
 }
 ```
 
-**Response:** `{}` on success, JSON-RPC error on failure.
+**Response (success):**
+```json
+{ "result": { "stateRoot": "0xbbb..." } }
+```
+
+`stateRoot` is the `arkiv_stateRoot` after applying the new chain. JSON-RPC error on failure.
 
 ---
 
@@ -961,7 +976,7 @@ PebbleDB (outside trie, same underlying database):
 | P2P, mempool, engine API | Via Reth | No | No |
 | Decoding Op[] calldata from sealed blocks | No | Yes | No |
 | Notifying EntityDB of chain events | No | Yes | No |
-| Computing arkiv_stateRoot (internal only) | No | No | Yes |
+| Computing and returning arkiv_stateRoot | No | No | Yes |
 | Anchoring arkiv_stateRoot on-chain (future) | Stores per block | Submits tx | Returns root |
 | Maintaining private query index (trie + bitmaps) | No | No | Yes |
 | Handling reorgs in query index | No | Detects and signals | Applies via journal |

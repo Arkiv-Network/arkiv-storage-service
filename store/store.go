@@ -75,32 +75,42 @@ func (s *Store) ProcessBlock(block types.ArkivBlock) (common.Hash, error) {
 	return s.processBlock(block)
 }
 
+// HeadRoot returns the arkiv_stateRoot of the current canonical head.
+func (s *Store) HeadRoot() common.Hash {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.headRoot
+}
+
 // RevertBlock undoes the effects of a previously processed block and restores
-// the canonical head to the block's parent.
-func (s *Store) RevertBlock(ref types.ArkivBlockRef) error {
+// the canonical head to the block's parent. Returns the new head state root.
+func (s *Store) RevertBlock(ref types.ArkivBlockRef) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.revertBlock(ref)
+	if err := s.revertBlock(ref); err != nil {
+		return common.Hash{}, err
+	}
+	return s.headRoot, nil
 }
 
 // Reorg atomically reverts revertedBlocks (newest-first) then applies newBlocks
-// (oldest-first). The write lock is held for the full duration, so no query
-// observes an intermediate state.
-func (s *Store) Reorg(revertedBlocks []types.ArkivBlockRef, newBlocks []types.ArkivBlock) error {
+// (oldest-first). Returns the new head state root. The write lock is held for
+// the full duration, so no query observes an intermediate state.
+func (s *Store) Reorg(revertedBlocks []types.ArkivBlockRef, newBlocks []types.ArkivBlock) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, ref := range revertedBlocks {
 		if err := s.revertBlock(ref); err != nil {
-			return fmt.Errorf("revert %s: %w", ref.Hash, err)
+			return common.Hash{}, fmt.Errorf("revert %s: %w", ref.Hash, err)
 		}
 	}
 	for i, block := range newBlocks {
 		if _, err := s.processBlock(block); err != nil {
-			return fmt.Errorf("new block %d: %w", i, err)
+			return common.Hash{}, fmt.Errorf("new block %d: %w", i, err)
 		}
 	}
-	return nil
+	return s.headRoot, nil
 }
 
 // processBlock is the internal implementation of ProcessBlock. Callers must hold s.mu.

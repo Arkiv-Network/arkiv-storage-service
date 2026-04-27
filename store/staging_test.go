@@ -169,7 +169,7 @@ func TestReorg_ProducesCorrectFinalState(t *testing.T) {
 
 	// Reorg: revert both old blocks (newest first), then apply new chain.
 	// New block 1 is empty; new block 2 creates entity C at testKey2/testAddr2.
-	err := s.Reorg(
+	_, err := s.Reorg(
 		[]types.ArkivBlockRef{
 			{Number: hexutil.Uint64(2), Hash: testHash2},
 			{Number: hexutil.Uint64(1), Hash: testHash1},
