@@ -145,7 +145,7 @@ SDK / clients
 
 1. A client submits a standard L3 transaction calling `EntityRegistry.execute(Op[] ops)`. The contract validates each operation and emits a log per operation. The resulting storage changes are committed in the L3 block's `stateRoot` when the block is sealed.
 2. Reth commits the sealed block. The ExEx receives a `ChainCommitted { chain }` notification.
-3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `entityKey` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `operations` list.
+3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `entityKey` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `transactions` list.
 4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block, computes `arkiv_stateRoot`, and returns it in the response. The ExEx does not currently submit it anywhere.
 5. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
 
@@ -259,7 +259,7 @@ The ExEx does not forward full blocks. For each block in the chain it:
 4. For each passing transaction, reads the logs emitted by the contract to extract the typed operation list. Each `EntityOperation` log includes the `entityKey` (the 32-byte `keccak256(chainId || registry || owner || nonce)` value minted by the contract). The EntityDB derives the trie account address as `entityKey[:20]`. The ExEx does not recompute keys locally.
 5. Passes `expires_at` through as a block number directly from the contract log — no timestamp conversion is needed. The EntityDB housekeeping process works in block numbers.
 
-If a block contains no Arkiv transactions it is still forwarded as an `ArkivBlock` with an empty `operations` list. The EntityDB must advance its state root for every block in the canonical chain, even empty ones, so that block-number-to-state-root mappings remain complete.
+If a block contains no Arkiv transactions it is still forwarded as an `ArkivBlock` with an empty `transactions` list. The EntityDB must advance its state root for every block in the canonical chain, even empty ones, so that block-number-to-state-root mappings remain complete.
 
 For `ChainReverted` and the `old_chain` side of `ChainReorged`, the ExEx does **not** re-parse calldata. The EntityDB reverts using its own journal; it needs only the block identifiers (number + hash) in newest-first order.
 
@@ -270,35 +270,52 @@ The Rust types the ExEx constructs and serializes:
 ```rust
 /// A block header subset — only the fields the EntityDB needs.
 ///
-/// - number:      used as the block-number key in the journal, in the arkiv_root
-///                mapping (blockHash → stateRoot), and for housekeeping (comparing
-///                block.number against entity.expires_at to identify expired entities).
+/// - number:      hex-encoded u64; used as the block-number key in the journal,
+///                in the arkiv_root mapping (blockHash → stateRoot), and for
+///                housekeeping (comparing block.number against entity.expires_at).
 /// - hash:        used as the other half of the journal key and for the arkiv_root
-///                mapping. Also the identifier returned to the ExEx so it can submit
-///                the arkiv_stateRoot commitment referencing the correct block.
-/// - parent_hash: used as a continuity check — the EntityDB verifies that each
-///                incoming block's parent_hash matches the hash of the block it
-///                processed immediately before. This guards against gaps or
-///                out-of-order delivery. Could be dropped if the ExEx guarantees
-///                strict ordering, but it is cheap to include.
+///                mapping.
+/// - parent_hash: continuity check — the EntityDB can verify each block's
+///                parent_hash matches the hash it last processed.
+/// - changeset_hash: rolling changeset hash after the last operation in this block;
+///                B256::ZERO for blocks with no operations. Informational only —
+///                the EntityDB does not currently use this field.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArkivBlockHeader {
-    pub number:      u64,
-    pub hash:        B256,
-    pub parent_hash: B256,
+    #[serde(with = "hex_u64")]
+    pub number:         u64,
+    pub hash:           B256,
+    pub parent_hash:    B256,
+    pub changeset_hash: B256,
 }
 
-/// A block containing only the Arkiv operations extracted from successful transactions.
-/// Non-Arkiv transactions and failed transactions are omitted entirely.
+/// A block containing only the Arkiv transactions extracted from successful
+/// EntityRegistry calls. Non-Arkiv transactions and failed calls are omitted.
+/// Blocks with no Arkiv activity are still forwarded with an empty transactions list.
 #[derive(Serialize)]
 pub struct ArkivBlock {
-    pub header:     ArkivBlockHeader,
-    pub operations: Vec<ArkivOperation>,  // empty if the block contained no Arkiv transactions
+    pub header:       ArkivBlockHeader,
+    pub transactions: Vec<ArkivTransaction>,
+}
+
+/// A single EntityRegistry call with its decoded operations.
+/// sender is placed here (at the transaction level) rather than duplicated
+/// into each individual operation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArkivTransaction {
+    pub hash:       B256,
+    pub index:      u32,
+    pub sender:     Address,   // becomes Creator in CreateOp; injected by the EntityDB
+    pub operations: Vec<ArkivOperation>,
 }
 
 /// Minimal block identifier used for revert payloads.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArkivBlockRef {
+    #[serde(with = "hex_u64")]
     pub number: u64,
     pub hash:   B256,
 }
@@ -310,55 +327,80 @@ pub enum ArkivOperation {
     Update(UpdateOp),
     Delete(DeleteOp),
     Extend(ExtendOp),
-    ChangeOwner(ChangeOwnerOp),
+    #[serde(rename = "transfer")]
+    Transfer(TransferOp),
+    Expire(ExpireOp),
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateOp {
     pub entity_key:   B256,      // keccak256(chainId || registry || owner || nonce) — from EntityOperation log
-    pub sender:       Address,   // becomes Creator in the EntityDB
+    pub owner:        Address,
+    pub expires_at:   u64,       // hex-encoded block number
+    pub entity_hash:  B256,
+    pub changeset_hash: B256,
     pub payload:      Bytes,
     pub content_type: String,
-    pub expires_at:   u64,       // block number, passed through directly from contract log
-    pub owner:        Address,
-    pub annotations:  Vec<Annotation>,
+    pub attributes:   Vec<Attribute>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateOp {
-    pub entity_key:  B256,
-    pub payload:     Bytes,
+    pub entity_key:   B256,
+    pub owner:        Address,
+    pub entity_hash:  B256,
+    pub changeset_hash: B256,
+    pub payload:      Bytes,
     pub content_type: String,
-    pub expires_at:  u64,        // block number
-    pub annotations: Vec<Annotation>,
+    pub attributes:   Vec<Attribute>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteOp {
     pub entity_key: B256,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExtendOp {
-    pub entity_key:    B256,
-    pub new_expires_at: u64,     // block number
+    pub entity_key: B256,
+    pub expires_at: u64,     // hex-encoded block number (new absolute expiry)
 }
 
 #[derive(Serialize)]
-pub struct ChangeOwnerOp {
+#[serde(rename_all = "camelCase")]
+pub struct TransferOp {
     pub entity_key: B256,
     pub new_owner:  Address,
 }
 
+/// ExpireOp removes an entity that has passed its expiration block.
+/// Semantically identical to DeleteOp from the EntityDB's perspective.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpireOp {
+    pub entity_key: B256,
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum Annotation {
+pub enum Attribute {
     String  { key: String, string_value:  String },
     Numeric { key: String, numeric_value: u64    },
 }
 ```
 
-The ExEx builds one `ArkivBlock` per block, regardless of whether any Arkiv transactions were found. The `operations` field is empty for blocks with no Arkiv activity. For revert payloads it builds `Vec<ArkivBlockRef>`.
+**Key wire format notes:**
+- `number` and `expires_at` are serialized as hex strings (`"0x..."`), matching go-ethereum's `hexutil.Uint64`.
+- `sender` lives at the `ArkivTransaction` level, not inside individual operations. The EntityDB injects it into `CreateOp.Sender` (the entity's `Creator`) when processing each block.
+- User-supplied key-value pairs are called `attributes` on the wire (not `annotations`).
+- The op type tag for ownership transfer is `"transfer"`; the EntityDB also accepts `"changeOwner"` as an alias for backward compatibility.
+- `"expire"` is a distinct op type (entity past its expiration block is removed by a caller); the EntityDB treats it identically to `"delete"`.
+
+The ExEx builds one `ArkivBlock` per block, regardless of whether any Arkiv transactions were found. The `transactions` field is empty for blocks with no Arkiv activity. For revert payloads it builds `Vec<ArkivBlockRef>`.
 
 ### arkiv_commitChain
 
@@ -372,22 +414,29 @@ Apply a contiguous sequence of `ArkivBlock`s to the canonical head. Blocks must 
     "blocks": [
       {
         "header": {
-          "number":     "0x3039",
-          "hash":       "0xabc...",
-          "parentHash": "0xdef..."
+          "number":        "0x3039",
+          "hash":          "0xabc...",
+          "parentHash":    "0xdef...",
+          "changesetHash": "0x..."
         },
-        "operations": [
+        "transactions": [
           {
-            "type":        "create",
-            "entityKey":   "0x1234...abcd",
-            "sender":      "0x...",
-            "payload":     "0x...",
-            "contentType": "application/json",
-            "expiresAt":   13500,
-            "owner":       "0x...",
-            "annotations": [
-              { "key": "type",     "stringValue":  "note" },
-              { "key": "priority", "numericValue": 5      }
+            "hash":   "0x...",
+            "index":  0,
+            "sender": "0x...",
+            "operations": [
+              {
+                "type":        "create",
+                "entityKey":   "0x1234...abcd",
+                "payload":     "0x...",
+                "contentType": "application/json",
+                "expiresAt":   "0x34bc",
+                "owner":       "0x...",
+                "attributes": [
+                  { "key": "type",     "stringValue":  "note" },
+                  { "key": "priority", "numericValue": 5      }
+                ]
+              }
             ]
           }
         ]
@@ -444,12 +493,17 @@ Atomically revert a set of blocks and commit a new set. Semantically equivalent 
     ],
     "newBlocks": [
       {
-        "header": { "number": "0x3039", "hash": "0x...", "parentHash": "0x..." },
-        "operations": []
+        "header": { "number": "0x3039", "hash": "0x...", "parentHash": "0x...", "changesetHash": "0x00...00" },
+        "transactions": []
       },
       {
-        "header": { "number": "0x303a", "hash": "0x...", "parentHash": "0x..." },
-        "operations": [{ "type": "delete", "entityAddress": "0x..." }]
+        "header": { "number": "0x303a", "hash": "0x...", "parentHash": "0x...", "changesetHash": "0x..." },
+        "transactions": [
+          {
+            "hash": "0x...", "index": 0, "sender": "0x...",
+            "operations": [{ "type": "delete", "entityKey": "0x..." }]
+          }
+        ]
       }
     ]
   }]
