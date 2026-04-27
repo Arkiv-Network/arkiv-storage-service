@@ -59,7 +59,7 @@ func main() {
 	// Register flags with their hard-coded defaults.
 	chainAddr := flag.String("chain-addr", ":2704", "address for the chain ingest JSON-RPC server (arkiv-op-reth → storaged)")
 	queryAddr := flag.String("query-addr", ":2705", "address for the query JSON-RPC server (SDK → storaged)")
-	dataDir := flag.String("data-dir", defaultDataDir(), "path to the data directory (PebbleDB + config.yaml)")
+	dataDir := flag.String("data-dir", defaultDataDir(), "path to the data directory (config.yaml read here; PebbleDB opened at <data-dir>/db)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `arkiv-storaged — Arkiv entity storage daemon
@@ -101,9 +101,11 @@ Flags:
 		*queryAddr = cfg.QueryAddr
 	}
 
-	// Open the database.
-	log.Info("opening pebble database", "path", *dataDir)
-	kv, err := pebble.New(*dataDir, 128, 512, "arkiv", false)
+	// Open the database at <data-dir>/db so config.yaml and the PebbleDB
+	// directory are siblings rather than mixed together.
+	dbPath := filepath.Join(*dataDir, "db")
+	log.Info("opening pebble database", "path", dbPath)
+	kv, err := pebble.New(dbPath, 128, 512, "arkiv", false)
 	if err != nil {
 		log.Error("failed to open pebble database", "err", err)
 		os.Exit(1)
