@@ -25,13 +25,18 @@ func NewMemory() *Store {
 // roots are retained by HashScheme, enabling point-in-time reads.
 //
 // Writes use a per-block CacheStore (staging layer) that accumulates all
-// mutations — trie nodes, entity blobs, bitmaps, ID maps, journal, and the
-// canonical head pointer — in an in-memory buffer and flushes them to PebbleDB
-// in a single atomic batch.Write(). This guarantees that a crash mid-block
-// never leaves the trie and bitmap index in inconsistent states.
+// mutations — trie nodes, entity blobs, bitmaps, ID maps, and the canonical
+// head pointer — in an in-memory buffer and flushes them to PebbleDB in a
+// single atomic batch.Write(). This guarantees that a crash mid-block never
+// leaves the trie and bitmap index in inconsistent states.
+//
+// On reorg, the trie reverts for free via HashScheme. Mutable PebbleDB entries
+// (arkiv_annot, arkiv_id, arkiv_addr) are repopulated from the system account
+// trie slots at the reverted state root (see revert.go).
 //
 // trieDB and stateDB on this struct are used only for the read path (queries,
-// openStateAt). All writes go through per-block CacheStore instances.
+// historical state opens, and reorg repopulation). All forward writes go
+// through per-block CacheStore instances.
 type Store struct {
 	rawDB   ethdb.Database
 	trieDB  *triedb.Database
@@ -93,16 +98,37 @@ func (s *Store) RevertBlock(ref types.ArkivBlockRef) (common.Hash, error) {
 	return s.headRoot, nil
 }
 
+// RevertBlocks reverts a contiguous sequence of blocks (newest-first) in a
+// single atomic operation, repopulating mutable PebbleDB entries once from the
+// common ancestor. Returns the new head state root.
+func (s *Store) RevertBlocks(refs []types.ArkivBlockRef) (common.Hash, error) {
+	if len(refs) == 0 {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.headRoot, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.revertToAncestor(refs); err != nil {
+		return common.Hash{}, err
+	}
+	return s.headRoot, nil
+}
+
 // Reorg atomically reverts revertedBlocks (newest-first) then applies newBlocks
 // (oldest-first). Returns the new head state root. The write lock is held for
 // the full duration, so no query observes an intermediate state.
+//
+// Mutable PebbleDB entries are repopulated once from the common ancestor state
+// root — not once per reverted block — so reorg cost is O(|arkiv_pairs| + |arkiv_id|)
+// regardless of how many blocks are reverted.
 func (s *Store) Reorg(revertedBlocks []types.ArkivBlockRef, newBlocks []types.ArkivBlock) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, ref := range revertedBlocks {
-		if err := s.revertBlock(ref); err != nil {
-			return common.Hash{}, fmt.Errorf("revert %s: %w", ref.Hash, err)
+	if len(revertedBlocks) > 0 {
+		if err := s.revertToAncestor(revertedBlocks); err != nil {
+			return common.Hash{}, err
 		}
 	}
 	for i, block := range newBlocks {
@@ -153,8 +179,9 @@ func (s *Store) processBlock(block types.ArkivBlock) (common.Hash, error) {
 }
 
 // revertBlock is the internal implementation of RevertBlock. Callers must hold s.mu.
-// All writes — journal replay, block index cleanup, and the updated head pointer —
-// land in a single atomic batch.Write().
+// It reverts a single block: repopulates mutable PebbleDB entries from the trie
+// at the parent state root, cleans up the block index, and updates the head
+// pointer — all in a single atomic batch.Write().
 func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
 	blockNumber := uint64(ref.Number)
 
@@ -171,14 +198,16 @@ func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
 		parentRoot = ethtypes.EmptyRootHash
 	}
 
-	batch := s.rawDB.NewBatch()
-
-	// Journal replay (reverse order) + journal key deletions into batch.
-	if err := revertBlockJournal(s.rawDB, batch, blockNumber, ref.Hash); err != nil {
-		return fmt.Errorf("revert journal: %w", err)
+	sdb, err := state.New(parentRoot, s.stateDB)
+	if err != nil {
+		return fmt.Errorf("open state at %s: %w", parentRoot, err)
 	}
 
-	// Block index cleanup.
+	batch := s.rawDB.NewBatch()
+
+	if err := repopulatePebbleDB(s.rawDB, batch, sdb); err != nil {
+		return fmt.Errorf("repopulate pebble: %w", err)
+	}
 	if err := batch.Delete(rootKey(ref.Hash)); err != nil {
 		return err
 	}
@@ -189,7 +218,6 @@ func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
 		return err
 	}
 
-	// Head pointer — written last as the commit gate for the revert.
 	newHeadNumber := uint64(0)
 	if blockNumber > 0 {
 		newHeadNumber = blockNumber - 1
@@ -197,7 +225,6 @@ func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
 	if err := batch.Put(headKey, encodeHead(newHeadNumber, parentHash, parentRoot)); err != nil {
 		return err
 	}
-
 	if err := batch.Write(); err != nil {
 		return fmt.Errorf("atomic revert flush: %w", err)
 	}
@@ -205,6 +232,67 @@ func (s *Store) revertBlock(ref types.ArkivBlockRef) error {
 	s.headRoot = parentRoot
 	s.headHash = parentHash
 	s.headNumber = newHeadNumber
+	return nil
+}
+
+// revertToAncestor reverts a sequence of blocks (newest-first) in a single
+// atomic operation. Mutable PebbleDB entries are repopulated once from the
+// common ancestor state root rather than once per reverted block.
+// Callers must hold s.mu.
+func (s *Store) revertToAncestor(revertedBlocks []types.ArkivBlockRef) error {
+	// revertedBlocks is newest-first; the common ancestor is the parent of the oldest.
+	oldest := revertedBlocks[len(revertedBlocks)-1]
+
+	parentHashBytes, err := s.rawDB.Get(parentKey(oldest.Hash))
+	if err != nil {
+		return fmt.Errorf("parent hash not found for block %s: %w", oldest.Hash, err)
+	}
+	ancestorHash := common.BytesToHash(parentHashBytes)
+
+	var ancestorRoot common.Hash
+	if b, err := s.rawDB.Get(rootKey(ancestorHash)); err == nil {
+		ancestorRoot = common.BytesToHash(b)
+	} else {
+		ancestorRoot = ethtypes.EmptyRootHash
+	}
+
+	sdb, err := state.New(ancestorRoot, s.stateDB)
+	if err != nil {
+		return fmt.Errorf("open state at %s: %w", ancestorRoot, err)
+	}
+
+	batch := s.rawDB.NewBatch()
+
+	if err := repopulatePebbleDB(s.rawDB, batch, sdb); err != nil {
+		return fmt.Errorf("repopulate pebble: %w", err)
+	}
+	for _, ref := range revertedBlocks {
+		n := uint64(ref.Number)
+		if err := batch.Delete(rootKey(ref.Hash)); err != nil {
+			return err
+		}
+		if err := batch.Delete(parentKey(ref.Hash)); err != nil {
+			return err
+		}
+		if err := batch.Delete(blockNumberKey(n)); err != nil {
+			return err
+		}
+	}
+
+	ancestorNumber := uint64(oldest.Number)
+	if ancestorNumber > 0 {
+		ancestorNumber--
+	}
+	if err := batch.Put(headKey, encodeHead(ancestorNumber, ancestorHash, ancestorRoot)); err != nil {
+		return err
+	}
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("atomic revert flush: %w", err)
+	}
+
+	s.headRoot = ancestorRoot
+	s.headHash = ancestorHash
+	s.headNumber = ancestorNumber
 	return nil
 }
 

@@ -6,8 +6,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// PebbleDB key prefixes. All mutable entries are journaled for reorg handling;
-// immutable entries (bm, pairs, root, parent) are never journaled or deleted.
+// PebbleDB key prefixes. Mutable entries (annot, id, addr) are repopulated
+// from the trie on reorg. Immutable entries (bm, pairs, root, parent) accumulate
+// and are never deleted.
 var (
 	prefixBitmap      = []byte("arkiv_bm")
 	prefixAnnot       = []byte("arkiv_annot")
@@ -16,7 +17,6 @@ var (
 	prefixPairs       = []byte("arkiv_pairs")
 	prefixRoot        = []byte("arkiv_root")
 	prefixParent      = []byte("arkiv_parent")
-	prefixJournal     = []byte("arkiv_journal")
 	prefixBlockNumber = []byte("arkiv_blknum")
 
 	// headKey is a single fixed key storing the canonical head (number, hash, stateRoot).
@@ -60,30 +60,11 @@ func parentKey(blockHash common.Hash) []byte {
 	return append(append([]byte{}, prefixParent...), blockHash.Bytes()...)
 }
 
-func journalKey(blockNumber uint64, blockHash common.Hash, entryIndex uint32) []byte {
-	k := append([]byte{}, prefixJournal...)
-	var nb [8]byte
-	binary.BigEndian.PutUint64(nb[:], blockNumber)
-	k = append(k, nb[:]...)
-	k = append(k, blockHash.Bytes()...)
-	var ib [4]byte
-	binary.BigEndian.PutUint32(ib[:], entryIndex)
-	return append(k, ib[:]...)
-}
-
 func blockNumberKey(number uint64) []byte {
 	k := append([]byte{}, prefixBlockNumber...)
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], number)
 	return append(k, b[:]...)
-}
-
-func journalPrefix(blockNumber uint64, blockHash common.Hash) []byte {
-	k := append([]byte{}, prefixJournal...)
-	var nb [8]byte
-	binary.BigEndian.PutUint64(nb[:], blockNumber)
-	k = append(k, nb[:]...)
-	return append(k, blockHash.Bytes()...)
 }
 
 // numericVal encodes a uint64 as 8-byte big-endian so that lexicographic key

@@ -392,7 +392,7 @@ func TestRevertBlock(t *testing.T) {
 		t.Error("entity still exists after revert")
 	}
 
-	// PebbleDB ID/addr mappings are reverted (not tombstoned — create was undone).
+	// PebbleDB ID/addr mappings are removed (create was undone; no tombstone needed).
 	if has, _ := s.rawDB.Has(idKey(1)); has {
 		t.Error("idKey(1) still present after revert")
 	}
@@ -403,13 +403,6 @@ func TestRevertBlock(t *testing.T) {
 	// Annotation bitmap pointer is reverted (key deleted).
 	if has, _ := s.rawDB.Has(annotKey("$all", "true")); has {
 		t.Error("$all annot pointer still present after revert")
-	}
-
-	// Journal entries for block 1 are deleted.
-	it := s.rawDB.NewIterator(journalPrefix(1, testHash1), nil)
-	defer it.Release()
-	if it.Next() {
-		t.Error("journal entries still present after revert")
 	}
 }
 

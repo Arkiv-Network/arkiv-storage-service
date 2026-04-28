@@ -94,7 +94,6 @@ type CacheStore struct {
 	stagingDB   *StagingDB
 	trieDB      *triedb.Database
 	stateDB     *state.StateDB
-	journal     *blockJournal
 	blockNumber uint64
 	blockHash   common.Hash
 	parentHash  common.Hash
@@ -119,7 +118,6 @@ func newCacheStore(real ethdb.Database, parentRoot common.Hash, blockNumber uint
 		stagingDB:     staging,
 		trieDB:        tdb,
 		stateDB:       stateDB,
-		journal:       &blockJournal{},
 		blockNumber:   blockNumber,
 		dirtyEntities: make(map[common.Address]*Entity),
 		dirtyBitmaps:  make(map[annotPair]*roaring64.Bitmap),
@@ -178,13 +176,7 @@ func (c *CacheStore) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("commit trie: %w", err)
 	}
 
-	// 5. Journal entries go into the staging memorydb.
-	//    persist calls stagingDB.NewBatch() → memorydb.batch → Write() → memorydb.
-	if err := c.journal.persist(c.stagingDB, c.blockNumber, c.blockHash); err != nil {
-		return common.Hash{}, fmt.Errorf("persist journal: %w", err)
-	}
-
-	// 6. Block index entries.
+	// 5. Block index entries.
 	if err := c.stagingDB.Put(rootKey(c.blockHash), newRoot.Bytes()); err != nil {
 		return common.Hash{}, err
 	}
@@ -195,7 +187,7 @@ func (c *CacheStore) Commit() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 
-	// 7. Canonical head pointer — written last as the commit gate.
+	// 6. Canonical head pointer — written last as the commit gate.
 	//    A crash before this write leaves arkiv_head at the previous block;
 	//    the store reopens in a consistent state. Orphaned trie nodes are
 	//    harmless (HashScheme never deletes content-addressed entries by hash).
@@ -203,8 +195,8 @@ func (c *CacheStore) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("stage head: %w", err)
 	}
 
-	// 8. Single atomic flush: trie nodes + entity blobs + bitmaps + ID maps +
-	//    journal + block index + canonical head all land in one batch.Write().
+	// 7. Single atomic flush: trie nodes + entity blobs + bitmaps + ID maps +
+	//    block index + canonical head all land in one batch.Write().
 	if err := c.stagingDB.commit(); err != nil {
 		return common.Hash{}, fmt.Errorf("atomic flush: %w", err)
 	}

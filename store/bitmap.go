@@ -23,18 +23,15 @@ func bitmapRemove(cs *CacheStore, key, val string, entityID uint64) error {
 }
 
 // mutateBitmap loads the bitmap for (key, val) into the per-block dirty cache
-// on first touch, journals the pre-block pointer value, then applies mutate.
-// The bitmap is not written to stagingDB until flushBitmaps() is called at
-// Commit time, so each annotation produces exactly one blob per block.
+// on first touch, then applies mutate. The bitmap is not written to stagingDB
+// until flushBitmaps() is called at Commit time, so each annotation produces
+// exactly one blob per block.
 func mutateBitmap(cs *CacheStore, key, val string, mutate func(*roaring64.Bitmap)) error {
 	pair := annotPair{key, val}
 
 	if _, cached := cs.dirtyBitmaps[pair]; !cached {
-		// First touch: read pre-block pointer and journal it for revert.
+		// First touch: load the existing bitmap, or start fresh if new.
 		oldHashBytes, _ := cs.stagingDB.Get(annotKey(key, val))
-		cs.journal.record(annotKey(key, val), oldHashBytes)
-
-		// Load the existing bitmap, or start fresh if this annotation is new.
 		bm := roaring64.New()
 		if len(oldHashBytes) == common.HashLength {
 			bmBytes, err := cs.stagingDB.Get(bitmapKey(common.BytesToHash(oldHashBytes)))

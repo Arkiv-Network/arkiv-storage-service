@@ -32,15 +32,11 @@ func (h *handler) CommitChain(_ context.Context, req CommitChainRequest) (*State
 }
 
 func (h *handler) Revert(_ context.Context, req RevertRequest) (*StateRootResponse, error) {
-	var stateRoot common.Hash
-	for _, ref := range req.Blocks {
-		var err error
-		stateRoot, err = h.store.RevertBlock(ref)
-		if err != nil {
-			return nil, fmt.Errorf("revert block %d: %w", ref.Number, err)
-		}
-		h.log.Info("revert", "block", ref.Number, "stateRoot", stateRoot)
+	stateRoot, err := h.store.RevertBlocks(req.Blocks)
+	if err != nil {
+		return nil, err
 	}
+	h.log.Info("revert", "stateRoot", stateRoot)
 	return &StateRootResponse{StateRoot: stateRoot}, nil
 }
 

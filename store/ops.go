@@ -98,17 +98,11 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 	cs.stateDB.CreateAccount(addr)
 	setIDSlot(cs.stateDB, entityID, addr)
 
-	// 2. Write PebbleDB ID/addr mappings and journal them (mutable; explicit revert).
-	idK := idKey(entityID)
-	addrK := addrKey(addr)
-	oldID, _ := cs.stagingDB.Get(idK)
-	oldAddr, _ := cs.stagingDB.Get(addrK)
-	cs.journal.record(idK, oldID)
-	cs.journal.record(addrK, oldAddr)
-	if err := cs.stagingDB.Put(idK, addr.Bytes()); err != nil {
+	// 2. Write PebbleDB ID/addr mappings (fast-path cache; repopulated from trie on reorg).
+	if err := cs.stagingDB.Put(idKey(entityID), addr.Bytes()); err != nil {
 		return err
 	}
-	if err := cs.stagingDB.Put(addrK, encodeUint64(entityID)); err != nil {
+	if err := cs.stagingDB.Put(addrKey(addr), encodeUint64(entityID)); err != nil {
 		return err
 	}
 

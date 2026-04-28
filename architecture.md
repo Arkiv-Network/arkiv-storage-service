@@ -260,7 +260,7 @@ The ExEx does not forward full blocks. For each block in the chain it:
 
 If a block contains no Arkiv transactions it is still forwarded as an `ArkivBlock` with an empty `transactions` list. The EntityDB must advance its state root for every block in the canonical chain, even empty ones, so that block-number-to-state-root mappings remain complete.
 
-For `ChainReverted` and the `old_chain` side of `ChainReorged`, the ExEx does **not** re-parse calldata. The EntityDB reverts by reverting the trie (free via HashScheme) and repopulating mutable PebbleDB entries from the trie; it needs only the identifier of the target block (the oldest block of the reverted range).
+For `ChainReverted` and the `old_chain` side of `ChainReorged`, the ExEx does **not** re-parse calldata. The EntityDB reverts by reverting the trie (free via HashScheme) and repopulating mutable PebbleDB entries from the trie in a single pass against the common ancestor state root; it needs only the block identifiers (number + hash, newest-first).
 
 ### Forwarded Types
 
@@ -453,14 +453,18 @@ Apply a contiguous sequence of `ArkivBlock`s to the canonical head. Blocks must 
 
 ### arkiv_revert
 
-Revert from the canonical head back to a target block. Only the target block identifier (the oldest block of the reverted range) is required — the EntityDB reverts the trie via HashScheme and repopulates mutable PebbleDB entries from the trie at that state root. It does not need the intermediate block identifiers or the original operations.
+Revert a contiguous sequence of blocks from the canonical head back to the common ancestor. Blocks are identified by number and hash only (newest-first); the EntityDB does not need the original operations. The EntityDB reverts the trie via HashScheme and repopulates mutable PebbleDB entries from the trie at the common ancestor state root in a single pass, regardless of how many blocks are listed.
 
 **Request:**
 ```json
 {
   "method": "arkiv_revert",
   "params": [{
-    "block": { "number": "0x3039", "hash": "0x..." }
+    "blocks": [
+      { "number": "0x303b", "hash": "0x..." },
+      { "number": "0x303a", "hash": "0x..." },
+      { "number": "0x3039", "hash": "0x..." }
+    ]
   }]
 }
 ```
@@ -669,6 +673,7 @@ This index is never reverted — once a pair has existed, it is part of the perm
 "arkiv_pairs"  + annotKey + "\x00" + annotVal           →  \x01                           (append-only existence flag)
 "arkiv_root"   + blockHash (32 bytes)                   →  stateRoot (32 bytes)           (per-block state root; written on ProcessBlock, deleted on RevertBlock)
 "arkiv_parent" + blockHash (32 bytes)                   →  parentHash (32 bytes)          (per-block parent pointer; written on ProcessBlock, deleted on RevertBlock)
+"arkiv_blknum" + blockNumber (8 bytes big-endian)       →  blockHash (32 bytes)           (block number→hash lookup; written on ProcessBlock, deleted on RevertBlock)
 "arkiv_head"                                            →  blockNumber (8 bytes) + blockHash (32 bytes) + stateRoot (32 bytes)  (canonical head; overwritten on every ProcessBlock and RevertBlock)
 ```
 
@@ -752,7 +757,7 @@ After processing all operations for a block, the EntityDB:
 
 1. Calls `flushEntities()`: encodes each dirty entity once and calls `SetCode`. One RLP encode + one `SetCode` per entity per block, regardless of how many operations modified it.
 2. Calls `flushBitmaps()`: serialises each dirty bitmap once, writes one content-addressed blob and one pointer update per annotation to the staging `memorydb`, and updates the corresponding system account trie slot via `StateDB.SetState`. One blob per annotation per block.
-3. Calls `StateDB.Commit(blockNumber, true)` to finalise trie changes (entity code and annotation slots from steps 1–2 included); dirty nodes move into the per-block `TrieDB`'s memory cache.
+3. Calls `StateDB.Commit(blockNumber, true, false)` to finalise trie changes (entity code and annotation slots from steps 1–2 included); dirty nodes move into the per-block `TrieDB`'s memory cache. The third argument (`false`) suppresses deletion of empty state objects — not required here since entity deletions are handled explicitly via `SetCode(nil)`.
 4. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes into the staging `memorydb` (not yet to PebbleDB). `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
 5. Flushes block index entries (`arkiv_root`, `arkiv_parent`, `arkiv_blknum`), and the canonical head (`arkiv_head`) into the same staging `memorydb`.
 6. Calls a single `batch.Write()` to atomically copy all staged entries to PebbleDB.
@@ -780,14 +785,15 @@ Mutable PebbleDB entries (`"arkiv_annot"`, `"arkiv_id"`, `"arkiv_addr"`) are not
 
 Revert is atomic. All writes — PebbleDB repopulation, block index key deletions, and the updated `arkiv_head` — are collected into a single `rawDB.NewBatch()` and flushed in one `batch.Write()`. The trie requires no writes (HashScheme retains all historical roots); `arkiv_head` is the last key written into the batch, serving as the commit gate.
 
-To revert to a target block (identified by number + hash):
+Given a list of reverted blocks (newest-first), the common ancestor is the parent of the oldest block in the list:
 
-1. Open a read-only `StateDB` at `arkiv_stateRoot` for the target block (looked up via `"arkiv_root" + targetBlockHash`).
-2. Repopulate `"arkiv_annot"`: for each pair in `"arkiv_pairs"`, read the system account slot at the target state root and write or delete the `"arkiv_annot"` entry accordingly.
-3. Repopulate `"arkiv_id"` / `"arkiv_addr"`: for each entry in `"arkiv_id"`, re-resolve from the system account slot; remove entries whose slot is zero.
-4. Add deletions of `"arkiv_root"`, `"arkiv_parent"`, and `"arkiv_blknum"` entries for all reverted blocks to the batch.
-5. Add the updated `"arkiv_head"` pointing to the target block to the batch.
-6. Call `batch.Write()` — all of the above lands atomically.
+1. Look up the parent hash of the oldest reverted block via `"arkiv_parent" + oldestBlockHash`. Look up the ancestor's state root via `"arkiv_root" + ancestorHash` (or `EmptyRootHash` if absent).
+2. Open a read-only `StateDB` at the ancestor state root.
+3. Repopulate `"arkiv_annot"`: for each pair in `"arkiv_pairs"`, read the system account slot at the ancestor state root and write or delete the `"arkiv_annot"` entry accordingly.
+4. Repopulate `"arkiv_id"` / `"arkiv_addr"`: for each entry in `"arkiv_id"`, re-resolve from the system account slot; remove entries whose slot is zero.
+5. Add deletions of `"arkiv_root"`, `"arkiv_parent"`, and `"arkiv_blknum"` entries for all reverted blocks to the batch.
+6. Add the updated `"arkiv_head"` pointing to the ancestor block to the batch.
+7. Call `batch.Write()` — all of the above lands atomically.
 
 ---
 
@@ -985,6 +991,7 @@ PebbleDB (outside trie, same underlying database):
   "arkiv_pairs"   + annotKey + "\x00" + annotVal           →  \x01                              (append-only existence index)
   "arkiv_root"    + blockHash (32 bytes)                   →  stateRoot (32 bytes)              (per-block; deleted on RevertBlock)
   "arkiv_parent"  + blockHash (32 bytes)                   →  parentHash (32 bytes)             (per-block parent pointer; deleted on RevertBlock)
+  "arkiv_blknum"  + blockNumber (8 bytes big-endian)       →  blockHash (32 bytes)              (block number→hash lookup; deleted on RevertBlock)
   "arkiv_head"                                             →  blockNumber + blockHash + stateRoot (72 bytes; canonical head, survives restart)
 ```
 
