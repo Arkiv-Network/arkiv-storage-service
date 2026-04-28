@@ -39,9 +39,8 @@
   - [Block Commit and State Root](#block-commit-and-state-root)
 - [5. Reorg Handling](#5-reorg-handling)
   - [Trie Reversion](#trie-reversion)
-  - [PebbleDB Journal](#pebbledb-journal)
+  - [PebbleDB Reversion](#pebbledb-reversion)
   - [Revert Procedure](#revert-procedure)
-  - [Journal Pruning](#journal-pruning)
 - [6. Query Execution](#6-query-execution)
   - [Latest-State Queries](#latest-state-queries)
     - [Equality and Inclusion Queries](#equality-and-inclusion-queries)
@@ -133,7 +132,7 @@ SDK / clients
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  State Engine                                            │   │
 │  │  - go-ethereum StateDB / Trie (library, not node)        │   │
-│  │  - PebbleDB: entity code, bitmaps, ID maps, journal      │   │
+│  │  - PebbleDB: entity code, bitmaps, ID maps               │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
                                      ▲
@@ -149,7 +148,7 @@ SDK / clients
 4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block, computes `arkiv_stateRoot`, and returns it in the response. The ExEx does not currently submit it anywhere.
 5. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
 
-On `ChainReverted`, the ExEx sends `arkiv_revert` with block identifiers only. The EntityDB replays its journal in reverse. On `ChainReorged`, the ExEx sends `arkiv_reorg` atomically.
+On `ChainReverted`, the ExEx sends `arkiv_revert` with block identifiers only. The EntityDB reverts the trie via HashScheme and repopulates mutable PebbleDB entries from the trie. On `ChainReorged`, the ExEx sends `arkiv_reorg` atomically.
 
 ---
 
@@ -261,7 +260,7 @@ The ExEx does not forward full blocks. For each block in the chain it:
 
 If a block contains no Arkiv transactions it is still forwarded as an `ArkivBlock` with an empty `transactions` list. The EntityDB must advance its state root for every block in the canonical chain, even empty ones, so that block-number-to-state-root mappings remain complete.
 
-For `ChainReverted` and the `old_chain` side of `ChainReorged`, the ExEx does **not** re-parse calldata. The EntityDB reverts using its own journal; it needs only the block identifiers (number + hash) in newest-first order.
+For `ChainReverted` and the `old_chain` side of `ChainReorged`, the ExEx does **not** re-parse calldata. The EntityDB reverts by reverting the trie (free via HashScheme) and repopulating mutable PebbleDB entries from the trie; it needs only the identifier of the target block (the oldest block of the reverted range).
 
 ### Forwarded Types
 
@@ -270,11 +269,10 @@ The Rust types the ExEx constructs and serializes:
 ```rust
 /// A block header subset — only the fields the EntityDB needs.
 ///
-/// - number:      hex-encoded u64; used as the block-number key in the journal,
-///                in the arkiv_root mapping (blockHash → stateRoot), and for
-///                housekeeping (comparing block.number against entity.expires_at).
-/// - hash:        used as the other half of the journal key and for the arkiv_root
-///                mapping.
+/// - number:      hex-encoded u64; used as the key in the arkiv_root/arkiv_blknum
+///                mappings (blockHash → stateRoot), and for housekeeping
+///                (comparing block.number against entity.expires_at).
+/// - hash:        used as the key in the arkiv_root and arkiv_parent mappings.
 /// - parent_hash: continuity check — the EntityDB can verify each block's
 ///                parent_hash matches the hash it last processed.
 /// - changeset_hash: rolling changeset hash after the last operation in this block;
@@ -455,18 +453,14 @@ Apply a contiguous sequence of `ArkivBlock`s to the canonical head. Blocks must 
 
 ### arkiv_revert
 
-Revert a contiguous sequence of blocks from the canonical head back to the common ancestor. Blocks are identified by number and hash only — the EntityDB uses its journal to undo state changes and does not need the original operations. Blocks must be ordered newest-first.
+Revert from the canonical head back to a target block. Only the target block identifier (the oldest block of the reverted range) is required — the EntityDB reverts the trie via HashScheme and repopulates mutable PebbleDB entries from the trie at that state root. It does not need the intermediate block identifiers or the original operations.
 
 **Request:**
 ```json
 {
   "method": "arkiv_revert",
   "params": [{
-    "blocks": [
-      { "number": "0x303b", "hash": "0x..." },
-      { "number": "0x303a", "hash": "0x..." },
-      { "number": "0x3039", "hash": "0x..." }
-    ]
+    "block": { "number": "0x3039", "hash": "0x..." }
   }]
 }
 ```
@@ -541,7 +535,7 @@ The Go EntityDB is a query engine. Its private trie and PebbleDB bitmaps exist t
 
 - **Immutable, content-addressed** — entity RLP blobs (`"c" + codeHash`) and bitmap byte arrays (`"arkiv_bm" + hash`) are written once and never overwritten. They piggyback on the trie's versioning mechanism: the trie root changes when content changes, and old content is never deleted. These entries require no journal.
 - **Mutable, auto-reverting (trie)** — trie account state (entity `codeHash`, system account slots). The logical account values change on each block via `StateDB.SetCode`/`SetState`, but the underlying `HashScheme` trie nodes are immutable and retained at the storage layer — each node is stored by hash and never overwritten. Reversion is free: the EntityDB simply re-opens a `StateDB` against the prior `arkiv_stateRoot`; no journal is needed.
-- **Mutable, journaled (PebbleDB)** — bitmap pointer entries (`"arkiv_annot"`), ID↔address mappings (`"arkiv_id"`, `"arkiv_addr"`). These are updated in place and are not versioned by the trie, so a per-block journal of before-values is required to reverse them on reorg (§5).
+- **Mutable, repopulated from trie on reorg (PebbleDB)** — bitmap pointer entries (`"arkiv_annot"`), ID↔address mappings (`"arkiv_id"`, `"arkiv_addr"`). These are updated in place and are not versioned by the trie. On reorg, they are repopulated by scanning `arkiv_pairs` and reading the corresponding system account trie slots at the reverted state root (§5). No per-block journal is maintained; reorg is rare and a full scan is acceptable.
 
 ### Entity Accounts
 
@@ -604,7 +598,7 @@ Each entity is assigned a `uint64` sequential ID at `Create` time, taken from th
 "arkiv_addr" + entity_address (20 bytes)        →  uint64_id (8 bytes big-endian)  (fast cache, mutable)
 ```
 
-`"arkiv_addr"` is used during Delete and Expire to look up the entity's ID before removing it from bitmaps. `"arkiv_id"` resolves query result IDs to entity addresses without a trie read on the hot path. Both are mutable and journaled for reorg handling.
+`"arkiv_addr"` is used during Delete and Expire to look up the entity's ID before removing it from bitmaps. `"arkiv_id"` resolves query result IDs to entity addresses without a trie read on the hot path. Both are populated at Create and serve as a performance cache; the system account trie slot is the authoritative source and is repopulated from on reorg.
 
 The system account slot is the authoritative, trie-committed source for ID→address. The PebbleDB entries are a performance cache that avoids trie traversal during query resolution. Both are kept in sync: written together at Create and the slot cleared at Delete/Expire (while the PebbleDB entries remain as tombstones).
 
@@ -676,7 +670,6 @@ This index is never reverted — once a pair has existed, it is part of the perm
 "arkiv_root"   + blockHash (32 bytes)                   →  stateRoot (32 bytes)           (per-block state root; written on ProcessBlock, deleted on RevertBlock)
 "arkiv_parent" + blockHash (32 bytes)                   →  parentHash (32 bytes)          (per-block parent pointer; written on ProcessBlock, deleted on RevertBlock)
 "arkiv_head"                                            →  blockNumber (8 bytes) + blockHash (32 bytes) + stateRoot (32 bytes)  (canonical head; overwritten on every ProcessBlock and RevertBlock)
-"arkiv_journal"+ blockNumber (8 bytes) + blockHash (32 bytes) + entry_index (4 bytes)     →  journal entry (see §4)
 ```
 
 The `"\x00"` separator between `annotKey` and `annotVal` ensures prefix scans cannot accidentally match a key that is a prefix of another. Keys and values must not contain `"\x00"` bytes; this is enforced at the application layer.
@@ -688,20 +681,19 @@ Bitmap mutations are accumulated in an in-memory per-block cache (`CacheStore.di
 On first access to a `(annotKey, annotVal)` pair within a block:
 
 1. Read the current hash `H_old` from `"arkiv_annot" + annotKey + "\x00" + annotVal` (treat as empty bitmap if absent).
-2. Record `{key: "arkiv_annot" + ..., oldValue: H_old}` in the per-block journal (once per pair per block).
-3. If `H_old` is non-zero, fetch bytes from `"arkiv_bm" + H_old`; deserialize into the in-memory cache.
+2. If `H_old` is non-zero, fetch bytes from `"arkiv_bm" + H_old`; deserialize into the in-memory cache.
 
 On each operation that touches the pair within the block:
 
-4. Apply the change (add or remove `entity_id`) to the cached in-memory bitmap. No PebbleDB write yet.
+3. Apply the change (add or remove `entity_id`) to the cached in-memory bitmap. No PebbleDB write yet.
 
 At block commit (`flushBitmaps`, called once per block before `StateDB.Commit`):
 
-5. Serialize the final bitmap; compute `H_new = keccak256(new_bytes)`.
-6. Write `"arkiv_bm" + H_new → new_bytes` (one new immutable entry per dirty annotation; `H_old` entry is left in place).
-7. Write `H_new` to `"arkiv_annot" + annotKey + "\x00" + annotVal` (mutable pointer).
-8. Write `H_new` to the system account slot via `StateDB.SetState` (trie-committed).
-9. If this is the first time this pair has ever been written, write `"arkiv_pairs" + annotKey + "\x00" + annotVal → \x01`.
+4. Serialize the final bitmap; compute `H_new = keccak256(new_bytes)`.
+5. Write `"arkiv_bm" + H_new → new_bytes` (one new immutable entry per dirty annotation; `H_old` entry is left in place).
+6. Write `H_new` to `"arkiv_annot" + annotKey + "\x00" + annotVal` (mutable pointer).
+7. Write `H_new` to the system account slot via `StateDB.SetState` (trie-committed).
+8. If this is the first time this pair has ever been written, write `"arkiv_pairs" + annotKey + "\x00" + annotVal → \x01`.
 
 #### Read Path
 
@@ -721,7 +713,7 @@ Entity state is also accumulated in an in-memory per-block cache (`CacheStore.di
 1. Read and increment `entity_count` in the system account; the new value is `entity_id`.
 2. `CreateAccount` on the entity address (nonce defaults to 0; no explicit nonce write needed).
 3. Write `slot[keccak256("id" || entity_id)] → address` in the system account via `StateDB.SetState` (trie-committed; reverts automatically on reorg).
-4. Write `"arkiv_id" + entity_id → address` and `"arkiv_addr" + address → entity_id` in PebbleDB. Record both in the per-block journal (fast-path cache; reverted explicitly on reorg).
+4. Write `"arkiv_id" + entity_id → address` and `"arkiv_addr" + address → entity_id` in PebbleDB (fast-path cache; repopulated from trie on reorg).
 5. Store the new `Entity` in the dirty entity cache. `SetCode` is deferred to `flushEntities` at commit.
 6. For each annotation `(k, v)` including built-ins (`$all`, `$creator`, `$createdAtBlock`, `$owner`, `$key`, `$expiration`, `$contentType`): update the in-memory bitmap cache. The blob write is deferred to `flushBitmaps` at commit.
 
@@ -740,7 +732,7 @@ Entity state is also accumulated in an in-memory per-block cache (`CacheStore.di
 3. For each annotation: update the in-memory bitmap (remove `entity_id`). Bitmap blob writes are deferred to `flushBitmaps`.
 4. Clear `slot[keccak256("id" || entity_id)]` in the system account via `StateDB.SetState(..., 0)` (trie-committed; reverts automatically on reorg).
 5. Remove the entity from the dirty cache and call `SetCode(nil)` immediately. The account is now EIP-161-empty and will be pruned by `StateDB.Finalise`. `SetCode(nil)` must be applied immediately (not deferred) so that subsequent operations in the same block see the entity as absent.
-6. Leave `"arkiv_id"` and `"arkiv_addr"` entries in place — they serve as tombstones in PebbleDB. Record no journal entry for them; they are never reverted on a chain revert. When the trie is reverted to the pre-delete state root (via HashScheme), the entity account and the system account `id` slot both reappear automatically.
+6. Leave `"arkiv_id"` and `"arkiv_addr"` entries in place — they serve as tombstones in PebbleDB. When the trie is reverted to the pre-delete state root (via HashScheme), the entity account and the system account `id` slot both reappear automatically; the PebbleDB entries are repopulated from the trie as part of the reorg procedure.
 
 #### Entity Expiration (Housekeeping)
 
@@ -752,9 +744,9 @@ Load the entity from the dirty cache or trie; update the relevant field in place
 
 ### Block Commit and State Root
 
-Block processing uses a write-ahead staging layer (`CacheStore`) to guarantee that all writes for a block land atomically. This matters because the EntityDB has two independent write paths — the trie (`TrieDB.Commit`) and direct PebbleDB mutations (bitmaps, ID maps, journal) — with no shared transaction boundary. Without coordination, a crash between them would leave the stores inconsistent: the trie ahead of the bitmap index, or vice versa. A partially-written block could corrupt query results or make reorg recovery unreliable.
+Block processing uses a write-ahead staging layer (`CacheStore`) to guarantee that all writes for a block land atomically. This matters because the EntityDB has two independent write paths — the trie (`TrieDB.Commit`) and direct PebbleDB mutations (bitmaps, ID maps) — with no shared transaction boundary. Without coordination, a crash between them would leave the stores inconsistent: the trie ahead of the bitmap index, or vice versa. A partially-written block could corrupt query results or make reorg recovery unreliable.
 
-`CacheStore` solves this by staging all writes — trie nodes, entity RLP blobs, bitmaps, ID maps, journal entries, and the canonical head pointer — in an in-memory `memorydb` during block processing. Nothing touches PebbleDB until the very end, when a single `batch.Write()` flushes everything atomically. The canonical head (`arkiv_head`) is the last key written into the batch, so it acts as a commit gate: if the process crashes before `batch.Write()` completes, PebbleDB's WAL guarantees the write either fully applied or fully rolled back, and `arkiv_head` either reflects the new block or the previous one — never a partial state.
+`CacheStore` solves this by staging all writes — trie nodes, entity RLP blobs, bitmaps, ID maps, and the canonical head pointer — in an in-memory `memorydb` during block processing. Nothing touches PebbleDB until the very end, when a single `batch.Write()` flushes everything atomically. The canonical head (`arkiv_head`) is the last key written into the batch, so it acts as a commit gate: if the process crashes before `batch.Write()` completes, PebbleDB's WAL guarantees the write either fully applied or fully rolled back, and `arkiv_head` either reflects the new block or the previous one — never a partial state.
 
 After processing all operations for a block, the EntityDB:
 
@@ -762,7 +754,7 @@ After processing all operations for a block, the EntityDB:
 2. Calls `flushBitmaps()`: serialises each dirty bitmap once, writes one content-addressed blob and one pointer update per annotation to the staging `memorydb`, and updates the corresponding system account trie slot via `StateDB.SetState`. One blob per annotation per block.
 3. Calls `StateDB.Commit(blockNumber, true)` to finalise trie changes (entity code and annotation slots from steps 1–2 included); dirty nodes move into the per-block `TrieDB`'s memory cache.
 4. Calls `TrieDB.Commit(stateRoot, false)` to flush trie nodes into the staging `memorydb` (not yet to PebbleDB). `false` means old nodes are not garbage-collected; `HashScheme` retains all historical roots.
-5. Flushes the per-block journal, block index entries (`arkiv_root`, `arkiv_parent`, `arkiv_blknum`), and the canonical head (`arkiv_head`) into the same staging `memorydb`.
+5. Flushes block index entries (`arkiv_root`, `arkiv_parent`, `arkiv_blknum`), and the canonical head (`arkiv_head`) into the same staging `memorydb`.
 6. Calls a single `batch.Write()` to atomically copy all staged entries to PebbleDB.
 7. Updates the in-memory canonical head pointer.
 
@@ -776,50 +768,26 @@ On restart, `New()` reads `"arkiv_head"` to restore the canonical head. If the k
 
 The `TrieDB` with `HashScheme` retains the state root for every committed block. Reverting the trie to a prior block is a no-op: the EntityDB simply opens a `StateDB` against the target state root. No trie writes are needed for reversion.
 
-### PebbleDB Journal
+### PebbleDB Reversion
 
-Mutable PebbleDB entries (`"arkiv_annot"`, `"arkiv_id"`, `"arkiv_addr"`) are not versioned by the trie. To support reversion, the EntityDB maintains a per-block journal of the before-values of every mutable PebbleDB entry modified during that block. The system account trie slots (`annot`, `id`) do not require journaling — they revert automatically with the trie via HashScheme.
+Mutable PebbleDB entries (`"arkiv_annot"`, `"arkiv_id"`, `"arkiv_addr"`) are not versioned by the trie. Rather than maintaining a per-block journal of before-values, the EntityDB repopulates them from the trie after reversion. This is correct because the authoritative values for all mutable PebbleDB entries are already committed in the system account trie slots, which revert automatically via HashScheme. Reorg is rare, so the cost of a full repopulation scan is acceptable.
 
-Each journal entry records:
+**`arkiv_annot` repopulation.** The `arkiv_pairs` set records every `(annotKey, annotVal)` pair ever seen (it is immutable and never reverted). For each pair, the current bitmap hash is stored in the system account at `slot[keccak256("annot" || annotKey + "\x00" + annotVal)]`. After reverting the trie, the EntityDB scans all entries under `"arkiv_pairs"`, reads the corresponding system account slot at the reverted state root, and writes the result back to `"arkiv_annot"`. Pairs whose slot is now zero (e.g. because they were first introduced in a reverted block) have their `"arkiv_annot"` entry deleted.
 
-```go
-type JournalEntry struct {
-    Key      []byte  // the PebbleDB key that was modified
-    OldValue []byte  // the value before the modification (nil if the key did not exist)
-}
-```
-
-Journal entries are written to PebbleDB under:
-
-```
-"arkiv_journal" + blockNumber (8 bytes big-endian) + blockHash (32 bytes) + entryIndex (4 bytes big-endian)  →  RLP(JournalEntry)
-```
-
-Writes to immutable entries (`"arkiv_bm"`, `"arkiv_pairs"`, `"arkiv_root"`) are never journaled. Immutable entries accumulate and are never reverted.
+**`arkiv_id` / `arkiv_addr` repopulation.** The ID→address mapping is stored in the system account at `slot[keccak256("id" || entity_id)]` for each live entity. After reversion, the EntityDB iterates `"arkiv_id"` entries and re-resolves each from the trie; entries for entities whose slot is now zero (deleted or not yet created at the reverted height) are removed.
 
 ### Revert Procedure
 
-Revert is also atomic. All writes for a given block reversion — journal replay, block index key deletions, and the updated `arkiv_head` — are collected into a single `rawDB.NewBatch()` and flushed in one `batch.Write()`. The trie requires no writes (HashScheme retains all historical roots); `arkiv_head` is the last key written into the batch, serving as the commit gate.
+Revert is atomic. All writes — PebbleDB repopulation, block index key deletions, and the updated `arkiv_head` — are collected into a single `rawDB.NewBatch()` and flushed in one `batch.Write()`. The trie requires no writes (HashScheme retains all historical roots); `arkiv_head` is the last key written into the batch, serving as the commit gate.
 
-To revert a sequence of blocks (newest-first):
+To revert to a target block (identified by number + hash):
 
-For each block being reverted:
-
-1. Read all journal entries for `(blockNumber, blockHash)` from PebbleDB.
-2. Add reverse-order replays to the batch:
-   - If `OldValue` is nil, delete the key.
-   - Otherwise, write `OldValue` back to the key.
-3. Add deletions of the journal entries, `"arkiv_root" + blockHash`, `"arkiv_parent" + blockHash`, and `"arkiv_blknum" + blockNumber` to the batch.
-4. Add the updated `"arkiv_head"` pointing to the parent block to the batch.
-5. Call `batch.Write()` — all of the above lands atomically.
-
-### Journal Pruning
-
-Once a block is finalized it can never be reverted, so its journal entries serve no purpose and can be deleted.
-
-**Pruning depth.** The EntityDB is an L3 built on OP Stack. A block is considered final once the corresponding L2 output root has been posted and the fault-proof challenge window has elapsed without a successful challenge. The challenge window is 7 days (configurable per OP Stack deployment). At a 2-second L3 block time this corresponds to approximately **302,400 L3 blocks** (7 × 24 × 3600 ÷ 2). Journal entries for blocks older than this depth are safe to delete. The depth is configurable; the default should be set conservatively at or above the deployed challenge window.
-
-**What is pruned.** Only `"arkiv_journal"` entries are deleted. Immutable entries (`"arkiv_bm"`, `"arkiv_pairs"`, `"c" + codeHash`) are never pruned — they are content-addressed and required for historical queries. `"arkiv_root"` and `"arkiv_parent"` entries are also retained indefinitely to support historical state root lookups.
+1. Open a read-only `StateDB` at `arkiv_stateRoot` for the target block (looked up via `"arkiv_root" + targetBlockHash`).
+2. Repopulate `"arkiv_annot"`: for each pair in `"arkiv_pairs"`, read the system account slot at the target state root and write or delete the `"arkiv_annot"` entry accordingly.
+3. Repopulate `"arkiv_id"` / `"arkiv_addr"`: for each entry in `"arkiv_id"`, re-resolve from the system account slot; remove entries whose slot is zero.
+4. Add deletions of `"arkiv_root"`, `"arkiv_parent"`, and `"arkiv_blknum"` entries for all reverted blocks to the batch.
+5. Add the updated `"arkiv_head"` pointing to the target block to the batch.
+6. Call `batch.Write()` — all of the above lands atomically.
 
 ---
 
@@ -1018,7 +986,6 @@ PebbleDB (outside trie, same underlying database):
   "arkiv_root"    + blockHash (32 bytes)                   →  stateRoot (32 bytes)              (per-block; deleted on RevertBlock)
   "arkiv_parent"  + blockHash (32 bytes)                   →  parentHash (32 bytes)             (per-block parent pointer; deleted on RevertBlock)
   "arkiv_head"                                             →  blockNumber + blockHash + stateRoot (72 bytes; canonical head, survives restart)
-  "arkiv_journal" + blockNumber + blockHash + entryIndex   →  RLP(JournalEntry)                 (prunable after finalization)
 ```
 
 ### Component Responsibilities
@@ -1035,7 +1002,7 @@ PebbleDB (outside trie, same underlying database):
 | Computing and returning arkiv_stateRoot | No | No | Yes |
 | Anchoring arkiv_stateRoot on-chain (future) | Stores per block | Submits tx | Returns root |
 | Maintaining private query index (trie + bitmaps) | No | No | Yes |
-| Handling reorgs in query index | No | Detects and signals | Applies via journal |
+| Handling reorgs in query index | No | Detects and signals | Repopulates from trie |
 | Serving entity queries | No | No | Yes |
 | Housekeeping / expiration | No | No | Yes |
 | Generating trie proofs (query index) | No | No | Yes |
