@@ -68,9 +68,9 @@
 
 ## Abstract
 
-This document describes the Arkiv EntityDB architecture, composed of three components: an `EntityRegistry` smart contract deployed on the Reth chain, a Reth execution extension (ExEx), and a standalone Go EntityDB service.
+This document describes the Arkiv EntityDB architecture, composed of three components: an `EntityRegistry` smart contract deployed on the op-reth chain, a Reth execution extension (ExEx), and a standalone Go EntityDB service.
 
-Arkiv databases are L3s. The Reth node, the `EntityRegistry` contract, and the ExEx all run on the L3. The L3 settles against an L2 (OP Stack), which in turn settles against Ethereum L1.
+Arkiv databases are L3s. The op-reth node, the `EntityRegistry` contract, and the ExEx all run on the L3. The L3 settles against an L2 (OP Stack), which in turn settles against Ethereum L1.
 
 All Arkiv mutations flow through the `EntityRegistry` contract. The contract validates each operation and emits logs that the ExEx parses and forwards to the Go EntityDB. After the EntityDB processes each block it computes `arkiv_stateRoot` — the root of its internal entity state trie — but does not currently submit it on-chain. The EntityDB and the op-reth node run as separate, independent processes.
 
@@ -102,36 +102,36 @@ SDK / clients
      | (standard L3 transaction)
      v
 ┌─────────────────────────────────────────────────────────────────┐
-│  L3 Reth Node                                                    │
-│                                                                  │
+│  L3 op-reth Node                                                │
+│                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  EntityRegistry (smart contract, on L3)                   │   │
-│  │  - Validates Arkiv operations                             │   │
-│  │  - Emits logs consumed by ExEx                            │   │
-│  │  - Committed in L3 stateRoot on every block               │   │
+│  │  EntityRegistry (smart contract, on L3)                  │   │
+│  │  - Validates Arkiv operations                            │   │
+│  │  - Emits logs consumed by ExEx                           │   │
+│  │  - Committed in L3 stateRoot on every block              │   │
 │  └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
+│                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Arkiv ExEx                                               │   │
-│  │  - Watches sealed blocks for EntityRegistry calls         │   │
-│  │  - Parses logs, forwards ops to Go EntityDB               │   │
+│  │  Arkiv ExEx                                              │   │
+│  │  - Watches sealed blocks for EntityRegistry calls        │   │
+│  │  - Parses logs, forwards ops to Go EntityDB              │   │
 │  └─────────────────────────────────┬────────────────────────┘   │
 └────────────────────────────────────│────────────────────────────┘
                                      │ HTTP JSON-RPC
                                      ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Go EntityDB Process (query index)                               │
-│                                                                  │
-│  ┌─────────────────────┐   ┌──────────────────────────────┐    │
-│  │  Chain Ingest API   │   │  Query Server                 │    │
-│  │  commitChain        │   │  arkiv_query                  │    │
-│  │  revert             │   │  arkiv_getEntity              │    │
-│  │  reorg              │   │                               │    │
-│  └──────────┬──────────┘   └──────────────┬───────────────┘    │
-│             │                              │                     │
-│             ▼                              ▼                     │
+│  Go EntityDB Process (query index)                              │
+│                                                                 │
+│  ┌─────────────────────┐   ┌──────────────────────────────┐     │
+│  │  Chain Ingest API   │   │  Query Server                │     │
+│  │  commitChain        │   │  arkiv_query                 │     │
+│  │  revert             │   │  arkiv_getEntity             │     │
+│  │  reorg              │   │                              │     │
+│  └──────────┬──────────┘   └──────────────┬───────────────┘     │
+│             │                             │                     │
+│             ▼                             ▼                     │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  State Engine                                             │   │
+│  │  State Engine                                            │   │
 │  │  - go-ethereum StateDB / Trie (library, not node)        │   │
 │  │  - PebbleDB: entity code, bitmaps, ID maps, journal      │   │
 │  └──────────────────────────────────────────────────────────┘   │
@@ -144,7 +144,7 @@ SDK / clients
 ### Data Flow
 
 1. A client submits a standard L3 transaction calling `EntityRegistry.execute(Op[] ops)`. The contract validates each operation and emits a log per operation. The resulting storage changes are committed in the L3 block's `stateRoot` when the block is sealed.
-2. Reth commits the sealed block. The ExEx receives a `ChainCommitted { chain }` notification.
+2. op-reth commits the sealed block. The ExEx receives a `ChainCommitted { chain }` notification.
 3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `entityKey` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `transactions` list.
 4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block, computes `arkiv_stateRoot`, and returns it in the response. The ExEx does not currently submit it anywhere.
 5. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
@@ -239,7 +239,7 @@ All methods are JSON-RPC 2.0 over HTTP. The ExEx is the only caller of the chain
 
 ### ExEx Filtering and Forwarding
 
-Reth delivers chain events to an ExEx via the `ExExNotification` enum:
+op-reth delivers chain events to an ExEx via the `ExExNotification` enum:
 
 ```rust
 pub enum ExExNotification {
@@ -249,7 +249,7 @@ pub enum ExExNotification {
 }
 ```
 
-`Chain` is Reth's type for a contiguous sequence of executed blocks. It exposes an iterator over `(SealedBlockWithSenders, ExecutionOutcome)` pairs — one per block — where `SealedBlockWithSenders` carries the sealed header, the full ordered transaction list with recovered senders, and `ExecutionOutcome` carries the receipts for each transaction in the same order.
+`Chain` is op-reth's type for a contiguous sequence of executed blocks. It exposes an iterator over `(SealedBlockWithSenders, ExecutionOutcome)` pairs — one per block — where `SealedBlockWithSenders` carries the sealed header, the full ordered transaction list with recovered senders, and `ExecutionOutcome` carries the receipts for each transaction in the same order.
 
 The ExEx does not forward full blocks. For each block in the chain it:
 
