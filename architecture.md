@@ -537,10 +537,11 @@ The Go EntityDB is a query engine. Its private trie and PebbleDB bitmaps exist t
 
 `arkiv_stateRoot` — the root of the EntityDB's trie after each block — is computed and retained internally but is not currently submitted on-chain (see the design decision note and §2).
 
-**Immutable vs mutable state.** Two distinct kinds of state live in the EntityDB:
+**Immutable vs mutable state.** Three distinct kinds of state live in the EntityDB:
 
 - **Immutable, content-addressed** — entity RLP blobs (`"c" + codeHash`) and bitmap byte arrays (`"arkiv_bm" + hash`) are written once and never overwritten. They piggyback on the trie's versioning mechanism: the trie root changes when content changes, and old content is never deleted. These entries require no journal.
-- **Mutable, journaled** — bitmap pointer entries (`"arkiv_annot"`), ID↔address mappings (`"arkiv_id"`, `"arkiv_addr"`), and trie account state are updated in place on each block. These entries are recorded in a per-block journal so they can be reversed on reorg (§5).
+- **Mutable, auto-reverting (trie)** — trie account state (entity `codeHash`, system account slots). The logical account values change on each block via `StateDB.SetCode`/`SetState`, but the underlying `HashScheme` trie nodes are immutable and retained at the storage layer — each node is stored by hash and never overwritten. Reversion is free: the EntityDB simply re-opens a `StateDB` against the prior `arkiv_stateRoot`; no journal is needed.
+- **Mutable, journaled (PebbleDB)** — bitmap pointer entries (`"arkiv_annot"`), ID↔address mappings (`"arkiv_id"`, `"arkiv_addr"`). These are updated in place and are not versioned by the trie, so a per-block journal of before-values is required to reverse them on reorg (§5).
 
 ### Entity Accounts
 
