@@ -565,10 +565,11 @@ Entity Account  (address = entity_key[:20])
   nonce    = 0
   balance  = 0
   codeHash = keccak256(RLP(entity))   // commits to full entity state in the trie
-  code     = RLP(entity)              // stored in PebbleDB under "c" + codeHash
 
   storage slots: none
 ```
+
+The RLP bytes are **not** stored inside the account. `codeHash` is the only entity-related field in the trie account; the actual `RLP(entity)` bytes are stored separately in PebbleDB under `"c" + codeHash` (content-addressed, outside the trie).
 
 `codeHash` is set to `keccak256(RLP(entity))`. The Go StateDB stores the RLP bytes in PebbleDB under `"c" + codeHash`. The EntityDB trie is never executed by an EVM, so no special prefix is needed to guard against bytecode interpretation. On every `Update`, the entity is re-encoded, `keccak256` is recomputed, and `SetCode` is called with the new bytes.
 
