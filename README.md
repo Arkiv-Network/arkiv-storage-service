@@ -37,6 +37,18 @@ Flags:
   -data-dir    path to the data directory                  (default ~/.arkiv-storaged)
 ```
 
+Run it with Docker Compose:
+
+```sh
+docker compose up --build
+```
+
+The compose service exposes the chain ingest server on `2704`, the query server
+on `2705`, and stores data in the `arkiv-storaged-data` volume.
+
+Images are published to `ghcr.io/arkiv-network/arkiv-storage-service` with the
+full commit SHA as the tag. Pushes to `main` also publish `latest`.
+
 ### Configuration file
 
 On startup `arkiv-storaged` reads `<data-dir>/config.yaml`. Command-line flags take precedence over file values. Example:

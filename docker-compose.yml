@@ -1,0 +1,21 @@
+services:
+  arkiv-storaged:
+    image: ghcr.io/arkiv-network/arkiv-storage-service:latest
+    build:
+      context: .
+    command:
+      - "-data-dir"
+      - "/data"
+      - "-chain-addr"
+      - ":2704"
+      - "-query-addr"
+      - ":2705"
+    ports:
+      - "2704:2704"
+      - "2705:2705"
+    volumes:
+      - arkiv-storaged-data:/data
+    restart: unless-stopped
+
+volumes:
+  arkiv-storaged-data:
