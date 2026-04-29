@@ -73,24 +73,23 @@ func bh(n uint64) common.Hash {
 
 // ----- op builders -----
 
-func mkCreate(key common.Hash, owner common.Address, payload, ct string, expiresAt uint64, annots ...types.Annotation) types.ArkivOperation {
+func mkCreate(key common.Hash, owner common.Address, payload, ct string, expiresAt uint64, attrs ...types.Attribute) types.ArkivOperation {
 	return types.ArkivOperation{Create: &types.CreateOp{
 		EntityKey:   key,
 		Owner:       owner,
 		Payload:     hexutil.Bytes(payload),
 		ContentType: ct,
 		ExpiresAt:   hexutil.Uint64(expiresAt),
-		Annotations: annots,
+		Attributes:  attrs,
 	}}
 }
 
-func mkUpdate(key common.Hash, payload, ct string, expiresAt uint64, annots ...types.Annotation) types.ArkivOperation {
+func mkUpdate(key common.Hash, payload, ct string, attrs ...types.Attribute) types.ArkivOperation {
 	return types.ArkivOperation{Update: &types.UpdateOp{
 		EntityKey:   key,
 		Payload:     hexutil.Bytes(payload),
 		ContentType: ct,
-		ExpiresAt:   hexutil.Uint64(expiresAt),
-		Annotations: annots,
+		Attributes:  attrs,
 	}}
 }
 
@@ -102,8 +101,8 @@ func mkExtend(key common.Hash, newExpiresAt uint64) types.ArkivOperation {
 	return types.ArkivOperation{Extend: &types.ExtendOp{EntityKey: key, ExpiresAt: hexutil.Uint64(newExpiresAt)}}
 }
 
-func mkChangeOwner(key common.Hash, newOwner common.Address) types.ArkivOperation {
-	return types.ArkivOperation{ChangeOwner: &types.ChangeOwnerOp{EntityKey: key, NewOwner: newOwner}}
+func mkTransfer(key common.Hash, newOwner common.Address) types.ArkivOperation {
+	return types.ArkivOperation{Transfer: &types.TransferOp{EntityKey: key, Owner: newOwner}}
 }
 
 func mkBlock(num uint64, ops ...types.ArkivOperation) types.ArkivBlock {
@@ -144,8 +143,8 @@ func mkBlockRefWithHash(num uint64, hash common.Hash) types.ArkivBlockRef {
 	return types.ArkivBlockRef{Number: hexutil.Uint64(num), Hash: hash}
 }
 
-func strAnnot(key, val string) types.Annotation {
-	return types.Annotation{Key: key, StringValue: &val}
+func strAttr(name, val string) types.Attribute {
+	return types.Attribute{ValueType: "string", Name: name, Value: hexutil.Bytes(val)}
 }
 
 // ----- test environment -----
@@ -350,8 +349,8 @@ func TestEntityLifecycle(t *testing.T) {
 	// Block 1: create entity1 (owner1, text/plain, expires=1000, category=doc)
 	// Block 2: create entity2 (owner2, text/html, expires=2000, category=img)
 	e.commit(t,
-		mkBlock(1, mkCreate(iKey1, iOwner1, "hello", "text/plain", 1000, strAnnot("category", "doc"))),
-		mkBlock(2, mkCreate(iKey2, iOwner2, "world", "text/html", 2000, strAnnot("category", "img"))),
+		mkBlock(1, mkCreate(iKey1, iOwner1, "hello", "text/plain", 1000, strAttr("category", "doc"))),
+		mkBlock(2, mkCreate(iKey2, iOwner2, "world", "text/html", 2000, strAttr("category", "img"))),
 	)
 
 	// Both entities visible.
@@ -396,8 +395,8 @@ func TestEntityLifecycle(t *testing.T) {
 		t.Errorf("CreatedAtBlock = %v, want 1", ed.CreatedAtBlock)
 	}
 
-	// Block 3: update entity1 — new payload, swap annotation, bump expiration.
-	e.commit(t, mkBlock(3, mkUpdate(iKey1, "updated", "text/plain", 1500, strAnnot("category", "archive"))))
+	// Block 3: update entity1 — new payload, swap annotation.
+	e.commit(t, mkBlock(3, mkUpdate(iKey1, "updated", "text/plain", strAttr("category", "archive"))))
 
 	if string(e.getEntity(t, iAddr1).Value) != "updated" {
 		t.Error("entity1 payload not updated")
@@ -405,16 +404,16 @@ func TestEntityLifecycle(t *testing.T) {
 	// Old annotation gone, new one present.
 	assertEmpty(t, e.doQuery(t, `category = "doc"`, nil))
 	assertKeys(t, e.doQuery(t, `category = "archive"`, nil), iKey1)
-	// Both entities have expiration > 1400 now (entity1=1500, entity2=2000).
-	assertKeys(t, e.doQuery(t, "$expiration > 1400", nil), iKey1, iKey2)
+	// entity1 expiration unchanged at 1000; only entity2 (2000) exceeds 1400.
+	assertKeys(t, e.doQuery(t, "$expiration > 1400", nil), iKey2)
 
 	// Block 4: extend entity1 to expiration 3000.
 	e.commit(t, mkBlock(4, mkExtend(iKey1, 3000)))
 
 	assertKeys(t, e.doQuery(t, "$expiration > 2500", nil), iKey1)
 
-	// Block 5: change entity2's owner from owner2 to owner1.
-	e.commit(t, mkBlock(5, mkChangeOwner(iKey2, iOwner1)))
+	// Block 5: transfer entity2 from owner2 to owner1.
+	e.commit(t, mkBlock(5, mkTransfer(iKey2, iOwner1)))
 
 	assertKeys(t, e.doQuery(t, "$owner = "+iOwner1.Hex(), nil), iKey1, iKey2)
 	assertEmpty(t, e.doQuery(t, "$owner = "+iOwner2.Hex(), nil))
@@ -456,7 +455,7 @@ func TestHistoricalQueries(t *testing.T) {
 	assertEmpty(t, e.doQuery(t, "$owner = "+iOwner1.Hex(), atBlock(3)))
 
 	// Block 4: update entity2 (change content type).
-	e.commit(t, mkBlock(4, mkUpdate(iKey2, "b-updated", "text/html", 200)))
+	e.commit(t, mkBlock(4, mkUpdate(iKey2, "b-updated", "text/html")))
 
 	assertKeys(t, e.doQuery(t, `$contentType = "text/plain"`, atBlock(2)), iKey1, iKey2)
 	assertKeys(t, e.doQuery(t, `$contentType = "text/plain"`, atBlock(3)), iKey2)
@@ -477,12 +476,12 @@ func TestRevertRestoresState(t *testing.T) {
 
 	// Block 1: create entity1 with original payload.
 	e.commit(t, mkBlock(1,
-		mkCreate(iKey1, iOwner1, "original", "text/plain", 100, strAnnot("tag", "alpha")),
+		mkCreate(iKey1, iOwner1, "original", "text/plain", 100, strAttr("tag", "alpha")),
 	))
 
 	// Block 2: update entity1, create entity2.
 	e.commit(t, mkBlock(2,
-		mkUpdate(iKey1, "updated", "text/plain", 100, strAnnot("tag", "beta")),
+		mkUpdate(iKey1, "updated", "text/plain", strAttr("tag", "beta")),
 		mkCreate(iKey2, iOwner2, "second", "text/html", 200),
 	))
 

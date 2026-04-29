@@ -182,7 +182,6 @@ func TestCreateEntity(t *testing.T) {
 func TestUpdateEntity(t *testing.T) {
 	s := NewMemory()
 
-	strVal := "note"
 	block1 := makeBlock(1, testHash1, common.Hash{},
 		types.ArkivOperation{Create: &types.CreateOp{
 			EntityKey:   testKey1,
@@ -190,21 +189,19 @@ func TestUpdateEntity(t *testing.T) {
 			ContentType: "text/plain",
 			ExpiresAt:   hexutil.Uint64(500),
 			Owner:       testOwner1,
-			Annotations: []types.Annotation{{Key: "type", StringValue: &strVal}},
+			Attributes:  []types.Attribute{{ValueType: "string", Name: "type", Value: hexutil.Bytes("note")}},
 		}},
 	)
 	if _, err := s.ProcessBlock(block1); err != nil {
 		t.Fatalf("ProcessBlock 1: %v", err)
 	}
 
-	newStrVal := "doc"
 	block2 := makeBlock(2, testHash2, testHash1,
 		types.ArkivOperation{Update: &types.UpdateOp{
 			EntityKey:   testKey1,
 			Payload:     hexutil.Bytes("updated"),
 			ContentType: "text/plain",
-			ExpiresAt:   hexutil.Uint64(600),
-			Annotations: []types.Annotation{{Key: "type", StringValue: &newStrVal}},
+			Attributes:  []types.Attribute{{ValueType: "string", Name: "type", Value: hexutil.Bytes("doc")}},
 		}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
@@ -215,8 +212,9 @@ func TestUpdateEntity(t *testing.T) {
 	if string(e.Payload) != "updated" {
 		t.Errorf("Payload = %q, want %q", e.Payload, "updated")
 	}
-	if e.ExpiresAt != 600 {
-		t.Errorf("ExpiresAt = %d, want 600", e.ExpiresAt)
+	// Update does not change expiration in v2; it stays at the value set on create.
+	if e.ExpiresAt != 500 {
+		t.Errorf("ExpiresAt = %d, want 500 (unchanged by Update)", e.ExpiresAt)
 	}
 	// Owner and Creator are immutable under Update.
 	if e.Owner != testOwner1 {
@@ -319,7 +317,7 @@ func TestChangeOwner(t *testing.T) {
 	}
 
 	block2 := makeBlock(2, testHash2, testHash1,
-		types.ArkivOperation{ChangeOwner: &types.ChangeOwnerOp{EntityKey: testKey1, NewOwner: testOwner2}},
+		types.ArkivOperation{Transfer: &types.TransferOp{EntityKey: testKey1, Owner: testOwner2}},
 	)
 	if _, err := s.ProcessBlock(block2); err != nil {
 		t.Fatalf("ProcessBlock changeOwner: %v", err)

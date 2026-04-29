@@ -67,8 +67,8 @@ func applyOp(cs *CacheStore, op types.ArkivOperation) error {
 		return processDelete(cs, op.Delete)
 	case op.Extend != nil:
 		return processExtend(cs, op.Extend)
-	case op.ChangeOwner != nil:
-		return processChangeOwner(cs, op.ChangeOwner)
+	case op.Transfer != nil:
+		return processTransfer(cs, op.Transfer)
 	case op.Expire != nil:
 		return processExpire(cs, op.Expire)
 	default:
@@ -116,13 +116,7 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 		ContentType:    op.ContentType,
 		Key:            op.EntityKey,
 	}
-	for _, a := range op.Annotations {
-		if a.StringValue != nil {
-			entity.StringAnnotations = append(entity.StringAnnotations, stringAnnot{a.Key, *a.StringValue})
-		} else if a.NumericValue != nil {
-			entity.NumericAnnotations = append(entity.NumericAnnotations, numericAnnot{a.Key, *a.NumericValue})
-		}
-	}
+	applyAttributes(entity, op.Attributes)
 	cs.dirtyEntities[addr] = entity
 
 	// 4. Update bitmap caches; blobs are deferred to flushBitmaps.
@@ -136,6 +130,7 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 }
 
 // processUpdate applies an Update operation.
+// Expiration is preserved unchanged; use ExtendOp to change it.
 func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	addr := common.Address(op.EntityKey[:20])
 
@@ -150,29 +145,16 @@ func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	}
 	entityID := decodeUint64(idBytes)
 
-	// expiresAt == 0 means the operation did not supply a new expiry
-	// (the CLI sends 0 for updates). Preserve the entity's current expiry.
-	newExpiresAt := uint64(op.ExpiresAt)
-	if newExpiresAt == 0 {
-		newExpiresAt = old.ExpiresAt
-	}
-
 	updated := &Entity{
 		Payload:        []byte(op.Payload),
 		Owner:          old.Owner,
 		Creator:        old.Creator,
-		ExpiresAt:      newExpiresAt,
+		ExpiresAt:      old.ExpiresAt,
 		CreatedAtBlock: old.CreatedAtBlock,
 		ContentType:    op.ContentType,
 		Key:            old.Key,
 	}
-	for _, a := range op.Annotations {
-		if a.StringValue != nil {
-			updated.StringAnnotations = append(updated.StringAnnotations, stringAnnot{a.Key, *a.StringValue})
-		} else if a.NumericValue != nil {
-			updated.NumericAnnotations = append(updated.NumericAnnotations, numericAnnot{a.Key, *a.NumericValue})
-		}
-	}
+	applyAttributes(updated, op.Attributes)
 
 	oldSet := annotPairSet(allAnnotations(*old))
 	newSet := annotPairSet(allAnnotations(*updated))
@@ -260,8 +242,8 @@ func processExpire(cs *CacheStore, op *types.ExpireOp) error {
 	return deleteEntity(cs, common.Address(op.EntityKey[:20]))
 }
 
-// processChangeOwner applies a ChangeOwner operation.
-func processChangeOwner(cs *CacheStore, op *types.ChangeOwnerOp) error {
+// processTransfer applies a Transfer operation. Owner is the new owner.
+func processTransfer(cs *CacheStore, op *types.TransferOp) error {
 	addr := common.Address(op.EntityKey[:20])
 
 	entity, err := cs.getEntity(addr)
@@ -278,10 +260,44 @@ func processChangeOwner(cs *CacheStore, op *types.ChangeOwnerOp) error {
 	if err := bitmapRemove(cs, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
 		return err
 	}
-	entity.Owner = op.NewOwner
+	entity.Owner = op.Owner
 	if err := bitmapAdd(cs, "$owner", strings.ToLower(entity.Owner.Hex()), entityID); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// applyAttributes converts v2 wire Attributes into the entity's StringAnnotations
+// and NumericAnnotations.
+//
+// - "string":    Value bytes trimmed of trailing nulls, decoded as UTF-8.
+// - "uint":      Value bytes interpreted as a big-endian unsigned integer,
+//                truncated to uint64 (takes the least-significant 8 bytes).
+// - "entityKey": Value bytes (32-byte hash) stored as lowercase hex.
+func applyAttributes(e *Entity, attrs []types.Attribute) {
+	for _, a := range attrs {
+		switch a.ValueType {
+		case "string":
+			s := strings.TrimRight(string(a.Value), "\x00")
+			e.StringAnnotations = append(e.StringAnnotations, stringAnnot{a.Name, s})
+		case "uint":
+			e.NumericAnnotations = append(e.NumericAnnotations, numericAnnot{a.Name, attrUint64(a.Value)})
+		case "entityKey":
+			e.StringAnnotations = append(e.StringAnnotations, stringAnnot{a.Name, strings.ToLower(common.BytesToHash(a.Value).Hex())})
+		}
+	}
+}
+
+// attrUint64 interprets a variable-length big-endian byte slice as a uint64,
+// taking the least-significant 8 bytes when the slice is longer than 8 bytes.
+func attrUint64(b []byte) uint64 {
+	if len(b) > 8 {
+		b = b[len(b)-8:]
+	}
+	var v uint64
+	for _, byt := range b {
+		v = v<<8 | uint64(byt)
+	}
+	return v
 }

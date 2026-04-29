@@ -19,7 +19,6 @@ import (
 func TestStagingOverlay_TwoOpsOnSameBitmap(t *testing.T) {
 	s := NewMemory()
 
-	noteStr := "note"
 	block := makeBlock(1, testHash1, common.Hash{},
 		types.ArkivOperation{Create: &types.CreateOp{
 			EntityKey:   testKey1,
@@ -28,7 +27,7 @@ func TestStagingOverlay_TwoOpsOnSameBitmap(t *testing.T) {
 			Payload:     hexutil.Bytes("p1"),
 			ContentType: "text/plain",
 			ExpiresAt:   hexutil.Uint64(100),
-			Annotations: []types.Annotation{{Key: "type", StringValue: &noteStr}},
+			Attributes:  []types.Attribute{{ValueType: "string", Name: "type", Value: hexutil.Bytes("note")}},
 		}},
 		types.ArkivOperation{Create: &types.CreateOp{
 			EntityKey:   testKey2,
@@ -37,7 +36,7 @@ func TestStagingOverlay_TwoOpsOnSameBitmap(t *testing.T) {
 			Payload:     hexutil.Bytes("p2"),
 			ContentType: "text/plain",
 			ExpiresAt:   hexutil.Uint64(100),
-			Annotations: []types.Annotation{{Key: "type", StringValue: &noteStr}},
+			Attributes:  []types.Attribute{{ValueType: "string", Name: "type", Value: hexutil.Bytes("note")}},
 		}},
 	)
 	if _, err := s.ProcessBlock(block); err != nil {
@@ -73,7 +72,6 @@ func TestCacheStore_DiscardOnFailure(t *testing.T) {
 			EntityKey:   testKey2, // not created yet → processUpdate returns error
 			Payload:     hexutil.Bytes("new"),
 			ContentType: "text/plain",
-			ExpiresAt:   200,
 		}},
 	)
 

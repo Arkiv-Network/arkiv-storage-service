@@ -8,12 +8,12 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
-// Annotation is a key/value pair attached to an entity.
-// Exactly one of StringValue or NumericValue is set.
-type Annotation struct {
-	Key          string  `json:"key"`
-	StringValue  *string `json:"stringValue,omitempty"`
-	NumericValue *uint64 `json:"numericValue,omitempty"`
+// Attribute is a v2 wire-format typed attribute.
+// JSON shape: {"valueType": "uint|string|entityKey", "name": "...", "value": "0x..."}
+type Attribute struct {
+	ValueType string        `json:"valueType"`
+	Name      string        `json:"name"`
+	Value     hexutil.Bytes `json:"value"`
 }
 
 // ArkivBlockHeader is the subset of a sealed block header forwarded by the ExEx.
@@ -21,6 +21,11 @@ type ArkivBlockHeader struct {
 	Number     hexutil.Uint64 `json:"number"`
 	Hash       common.Hash    `json:"hash"`
 	ParentHash common.Hash    `json:"parentHash"`
+	// ChangesetHash is the rolling changeset hash as of the end of this block.
+	// For blocks with operations it equals the last operation's changesetHash;
+	// for empty blocks it carries forward from the previous non-empty block.
+	// Zero when no operation has ever been recorded as of this block.
+	ChangesetHash common.Hash `json:"changesetHash"`
 }
 
 // ArkivBlock is a sealed block containing only the Arkiv transactions extracted
@@ -48,12 +53,12 @@ type ArkivBlockRef struct {
 // ArkivOperation is a discriminated union of the Arkiv operation types.
 // Exactly one of the pointer fields is non-nil after unmarshaling.
 type ArkivOperation struct {
-	Create      *CreateOp
-	Update      *UpdateOp
-	Delete      *DeleteOp
-	Extend      *ExtendOp
-	ChangeOwner *ChangeOwnerOp
-	Expire      *ExpireOp
+	Create   *CreateOp
+	Update   *UpdateOp
+	Delete   *DeleteOp
+	Extend   *ExtendOp
+	Transfer *TransferOp
+	Expire   *ExpireOp
 }
 
 func (o ArkivOperation) MarshalJSON() ([]byte, error) {
@@ -82,12 +87,12 @@ func (o ArkivOperation) MarshalJSON() ([]byte, error) {
 			*ExtendOp
 		}
 		return json.Marshal(T{Type: "extend", ExtendOp: o.Extend})
-	case o.ChangeOwner != nil:
+	case o.Transfer != nil:
 		type T struct {
 			Type string `json:"type"`
-			*ChangeOwnerOp
+			*TransferOp
 		}
-		return json.Marshal(T{Type: "transfer", ChangeOwnerOp: o.ChangeOwner})
+		return json.Marshal(T{Type: "transfer", TransferOp: o.Transfer})
 	case o.Expire != nil:
 		type T struct {
 			Type string `json:"type"`
@@ -119,9 +124,9 @@ func (o *ArkivOperation) UnmarshalJSON(data []byte) error {
 	case "extend":
 		o.Extend = new(ExtendOp)
 		return json.Unmarshal(data, o.Extend)
-	case "transfer", "changeOwner":
-		o.ChangeOwner = new(ChangeOwnerOp)
-		return json.Unmarshal(data, o.ChangeOwner)
+	case "transfer":
+		o.Transfer = new(TransferOp)
+		return json.Unmarshal(data, o.Transfer)
 	case "expire":
 		o.Expire = new(ExpireOp)
 		return json.Unmarshal(data, o.Expire)
@@ -131,49 +136,67 @@ func (o *ArkivOperation) UnmarshalJSON(data []byte) error {
 }
 
 type CreateOp struct {
+	OpIndex uint32 `json:"opIndex"`
 	// EntityKey is the 32-byte key minted by the EntityRegistry contract:
 	//   keccak256(chainId || registry || owner || nonce)
-	// Forwarded directly from the EntityOperation log by the ExEx.
 	// The trie account address is derived as EntityKey[:20].
-	EntityKey   common.Hash    `json:"entityKey"`
+	EntityKey common.Hash `json:"entityKey"`
 	// Sender is populated from ArkivTransaction.Sender by processBlock; it is
 	// not part of the wire format (the ExEx places sender at the tx level).
-	Sender      common.Address `json:"-"`
-	Payload     hexutil.Bytes  `json:"payload"`
-	ContentType string         `json:"contentType"`
-	// ExpiresAt is serialized as a hex string by the Rust ExEx ("0x...").
-	ExpiresAt   hexutil.Uint64 `json:"expiresAt"`
-	Owner       common.Address `json:"owner"`
-	// Annotations are called "attributes" on the wire (Rust field name).
-	Annotations []Annotation   `json:"attributes"`
+	Sender        common.Address `json:"-"`
+	Owner         common.Address `json:"owner"`
+	ExpiresAt     hexutil.Uint64 `json:"expiresAt"`
+	EntityHash    common.Hash    `json:"entityHash"`
+	ChangesetHash common.Hash    `json:"changesetHash"`
+	Payload       hexutil.Bytes  `json:"payload"`
+	ContentType   string         `json:"contentType"`
+	Attributes    []Attribute    `json:"attributes"`
 }
 
+// UpdateOp replaces an entity's payload, content type, and attributes.
+// Expiration is not changed by an update; use ExtendOp to change it.
 type UpdateOp struct {
-	EntityKey   common.Hash    `json:"entityKey"`
-	Payload     hexutil.Bytes  `json:"payload"`
-	ContentType string         `json:"contentType"`
-	ExpiresAt   hexutil.Uint64 `json:"expiresAt"`
-	// Annotations are called "attributes" on the wire (Rust field name).
-	Annotations []Annotation   `json:"attributes"`
+	OpIndex       uint32         `json:"opIndex"`
+	EntityKey     common.Hash    `json:"entityKey"`
+	Owner         common.Address `json:"owner"`
+	EntityHash    common.Hash    `json:"entityHash"`
+	ChangesetHash common.Hash    `json:"changesetHash"`
+	Payload       hexutil.Bytes  `json:"payload"`
+	ContentType   string         `json:"contentType"`
+	Attributes    []Attribute    `json:"attributes"`
 }
 
 type DeleteOp struct {
-	EntityKey common.Hash `json:"entityKey"`
+	OpIndex       uint32         `json:"opIndex"`
+	EntityKey     common.Hash    `json:"entityKey"`
+	Owner         common.Address `json:"owner"`
+	EntityHash    common.Hash    `json:"entityHash"`
+	ChangesetHash common.Hash    `json:"changesetHash"`
 }
 
 type ExtendOp struct {
-	EntityKey common.Hash    `json:"entityKey"`
-	// ExpiresAt is the new absolute expiration block, serialized as hex ("0x...").
-	ExpiresAt hexutil.Uint64 `json:"expiresAt"`
+	OpIndex       uint32         `json:"opIndex"`
+	EntityKey     common.Hash    `json:"entityKey"`
+	Owner         common.Address `json:"owner"`
+	ExpiresAt     hexutil.Uint64 `json:"expiresAt"`
+	EntityHash    common.Hash    `json:"entityHash"`
+	ChangesetHash common.Hash    `json:"changesetHash"`
 }
 
-type ChangeOwnerOp struct {
-	EntityKey common.Hash    `json:"entityKey"`
-	NewOwner  common.Address `json:"newOwner"`
+// TransferOp changes the owner of an entity. Owner is the new owner (derived
+// from the EntityOperation event's owner field at the time of the transfer).
+type TransferOp struct {
+	OpIndex       uint32         `json:"opIndex"`
+	EntityKey     common.Hash    `json:"entityKey"`
+	Owner         common.Address `json:"owner"`
+	EntityHash    common.Hash    `json:"entityHash"`
+	ChangesetHash common.Hash    `json:"changesetHash"`
 }
 
-// ExpireOp removes an entity that has passed its expiration block.
-// Wire type tag: "expire".
 type ExpireOp struct {
-	EntityKey common.Hash `json:"entityKey"`
+	OpIndex       uint32         `json:"opIndex"`
+	EntityKey     common.Hash    `json:"entityKey"`
+	Owner         common.Address `json:"owner"`
+	EntityHash    common.Hash    `json:"entityHash"`
+	ChangesetHash common.Hash    `json:"changesetHash"`
 }

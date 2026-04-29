@@ -1,6 +1,7 @@
 package query_test
 
 import (
+	"encoding/binary"
 	"sort"
 	"testing"
 
@@ -41,7 +42,7 @@ func makeQBlock(number uint64, hash, parent common.Hash, ops ...types.ArkivOpera
 	}
 }
 
-func makeQCreate(entityKey common.Hash, sender, owner common.Address, contentType string, expiresAt uint64, annots ...types.Annotation) types.ArkivOperation {
+func makeQCreate(entityKey common.Hash, sender, owner common.Address, contentType string, expiresAt uint64, attrs ...types.Attribute) types.ArkivOperation {
 	return types.ArkivOperation{
 		Create: &types.CreateOp{
 			EntityKey:   entityKey,
@@ -49,7 +50,7 @@ func makeQCreate(entityKey common.Hash, sender, owner common.Address, contentTyp
 			ContentType: contentType,
 			ExpiresAt:   hexutil.Uint64(expiresAt),
 			Owner:       owner,
-			Annotations: annots,
+			Attributes:  attrs,
 		},
 	}
 }
@@ -95,12 +96,14 @@ func assertIDs(t *testing.T, got []uint64, want []uint64) {
 	}
 }
 
-func strAnnot(key, val string) types.Annotation {
-	return types.Annotation{Key: key, StringValue: &val}
+func strAttr(name, val string) types.Attribute {
+	return types.Attribute{ValueType: "string", Name: name, Value: hexutil.Bytes(val)}
 }
 
-func numAnnot(key string, val uint64) types.Annotation {
-	return types.Annotation{Key: key, NumericValue: &val}
+func numAttr(name string, val uint64) types.Attribute {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, val)
+	return types.Attribute{ValueType: "uint", Name: name, Value: hexutil.Bytes(b)}
 }
 
 // TestEvaluateAll verifies that * and $all return every live entity.
@@ -191,9 +194,9 @@ func TestEvaluateNumericRangeEdge(t *testing.T) {
 func TestEvaluateUserAnnotation(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100, strAnnot("type", "document")),
-		makeQCreate(eKey2, qSender, qOwner1, "text/plain", 200, strAnnot("type", "image")),
-		makeQCreate(eKey3, qSender, qOwner1, "text/plain", 300, numAnnot("score", 42)),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100, strAttr("type", "document")),
+		makeQCreate(eKey2, qSender, qOwner1, "text/plain", 200, strAttr("type", "image")),
+		makeQCreate(eKey3, qSender, qOwner1, "text/plain", 300, numAttr("score", 42)),
 	))
 	assertIDs(t, evaluate(t, s, `type = "document"`), []uint64{1})
 	assertIDs(t, evaluate(t, s, `type = "image"`), []uint64{2})
@@ -219,9 +222,9 @@ func TestEvaluateInclusion(t *testing.T) {
 func TestEvaluateGlobPrefix(t *testing.T) {
 	s := store.NewMemory()
 	mustProcess(t, s, makeQBlock(1, qHash1, common.Hash{},
-		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100, strAnnot("mime", "text/plain")),
-		makeQCreate(eKey2, qSender, qOwner1, "text/html", 200, strAnnot("mime", "text/html")),
-		makeQCreate(eKey3, qSender, qOwner1, "image/png", 300, strAnnot("mime", "image/png")),
+		makeQCreate(eKey1, qSender, qOwner1, "text/plain", 100, strAttr("mime", "text/plain")),
+		makeQCreate(eKey2, qSender, qOwner1, "text/html", 200, strAttr("mime", "text/html")),
+		makeQCreate(eKey3, qSender, qOwner1, "image/png", 300, strAttr("mime", "image/png")),
 	))
 	assertIDs(t, evaluate(t, s, `mime ~ "text/*"`), []uint64{1, 2})
 	assertIDs(t, evaluate(t, s, `mime ~ "image/*"`), []uint64{3})
