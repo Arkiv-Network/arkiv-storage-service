@@ -1,0 +1,10 @@
+.git
+.github
+bin
+arkiv-storaged
+Dockerfile
+README.md
+architecture.md
+*.md
+tmp
+vendor
