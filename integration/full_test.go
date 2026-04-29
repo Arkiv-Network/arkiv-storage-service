@@ -28,7 +28,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "create temp file: %v\n", err)
 		os.Exit(1)
 	}
-	tmp.Close()
+	_ = tmp.Close()
 	binaryPath = tmp.Name()
 
 	build := exec.Command("go", "build", "-o", binaryPath, "../cmd/arkiv-storaged")
@@ -36,12 +36,12 @@ func TestMain(m *testing.M) {
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "build arkiv-storaged: %v\n", err)
-		os.Remove(binaryPath)
+		_ = os.Remove(binaryPath)
 		os.Exit(1)
 	}
 
 	code := m.Run()
-	os.Remove(binaryPath)
+	_ = os.Remove(binaryPath)
 	os.Exit(code)
 }
 
@@ -162,7 +162,9 @@ func freePort(t *testing.T) int {
 		t.Fatalf("find free port: %v", err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
 	return port
 }
 
@@ -173,7 +175,7 @@ func waitReady(t *testing.T, addr string) {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 		time.Sleep(25 * time.Millisecond)

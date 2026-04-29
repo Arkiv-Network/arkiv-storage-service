@@ -38,21 +38,22 @@ func defaultDataDir() string {
 }
 
 // loadConfig reads <dataDir>/config.json. Missing file is not an error.
-func loadConfig(dataDir string) (config, error) {
-	var cfg config
+func loadConfig(dataDir string) (cfg config, err error) {
 	path := filepath.Join(dataDir, configFileName)
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
 	}
 	if err != nil {
-		return cfg, err
+		return
 	}
-	defer f.Close()
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
-		return cfg, err
-	}
-	return cfg, nil
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	err = yaml.NewDecoder(f).Decode(&cfg)
+	return
 }
 
 func main() {
