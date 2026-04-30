@@ -58,8 +58,8 @@ func loadConfig(dataDir string) (cfg config, err error) {
 
 func main() {
 	// Register flags with their hard-coded defaults.
-	chainAddr := flag.String("chain-addr", ":2704", "address for the chain ingest JSON-RPC server (arkiv-op-reth → storaged)")
-	queryAddr := flag.String("query-addr", ":2705", "address for the query JSON-RPC server (SDK → storaged)")
+	chainAddr := flag.String("chain-addr", "127.0.0.1:2704", "address for the chain ingest JSON-RPC server (arkiv-op-reth → storaged)")
+	queryAddr := flag.String("query-addr", "127.0.0.1:2705", "address for the query JSON-RPC server (SDK → storaged)")
 	dataDir := flag.String("data-dir", defaultDataDir(), "path to the data directory (config.yaml read here; PebbleDB opened at <data-dir>/db)")
 
 	flag.Usage = func() {

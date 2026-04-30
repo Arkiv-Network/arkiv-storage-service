@@ -32,8 +32,8 @@ Run it:
 arkiv-storaged [flags]
 
 Flags:
-  -chain-addr  listen address for the chain ingest server  (default :2704)
-  -query-addr  listen address for the query server         (default :2705)
+  -chain-addr  listen address for the chain ingest server  (default 127.0.0.1:2704)
+  -query-addr  listen address for the query server         (default 127.0.0.1:2705)
   -data-dir    path to the data directory                  (default ~/.arkiv-storaged)
 ```
 
@@ -42,8 +42,8 @@ Flags:
 On startup `arkiv-storaged` reads `<data-dir>/config.yaml`. Command-line flags take precedence over file values. Example:
 
 ```yaml
-chain-addr: ":2704"
-query-addr: ":2705"
+chain-addr: "127.0.0.1:2704"
+query-addr: "127.0.0.1:2705"
 ```
 
 ## JSON-RPC interface
