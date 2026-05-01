@@ -20,14 +20,17 @@ const queryResultCountLimit uint64 = 200
 // IncludeData controls which fields are populated in each EntityData result.
 // The zero value includes nothing; nil Options defaults to including everything.
 type IncludeData struct {
-	Key                bool `json:"key"`
-	Attributes         bool `json:"attributes"`
-	SyntheticAttributes bool `json:"syntheticAttributes"`
-	Payload            bool `json:"payload"`
-	ContentType        bool `json:"contentType"`
-	Expiration         bool `json:"expiration"`
-	Owner              bool `json:"owner"`
-	CreatedAtBlock     bool `json:"createdAtBlock"`
+	Key                         bool `json:"key"`
+	Attributes                  bool `json:"attributes"`
+	SyntheticAttributes         bool `json:"syntheticAttributes"`
+	Payload                     bool `json:"payload"`
+	ContentType                 bool `json:"contentType"`
+	Expiration                  bool `json:"expiration"`
+	Owner                       bool `json:"owner"`
+	CreatedAtBlock              bool `json:"createdAtBlock"`
+	LastModifiedAtBlock         bool `json:"lastModifiedAtBlock"`
+	TransactionIndexInBlock     bool `json:"transactionIndexInBlock"`
+	OperationIndexInTransaction bool `json:"operationIndexInTransaction"`
 }
 
 // Options holds per-request query parameters.
@@ -52,7 +55,16 @@ func (o *Options) getResultsPerPage() uint64 {
 
 func (o *Options) getIncludeData() IncludeData {
 	if o == nil || o.IncludeData == nil {
-		return IncludeData{Key: true, ContentType: true, Payload: true, Owner: true, Attributes: true, Expiration: true, CreatedAtBlock: true}
+		return IncludeData{
+			Key:                 true,
+			ContentType:         true,
+			Payload:             true,
+			Owner:               true,
+			Attributes:          true,
+			Expiration:          true,
+			CreatedAtBlock:      true,
+			LastModifiedAtBlock: true,
+		}
 	}
 	return *o.IncludeData
 }
@@ -77,12 +89,15 @@ type QueryResponse struct {
 
 // EntityData holds the fields returned for each matched entity.
 type EntityData struct {
-	Key            *common.Hash    `json:"key,omitempty"`
-	Value          hexutil.Bytes   `json:"value,omitempty"`
-	ContentType    *string         `json:"contentType,omitempty"`
-	ExpiresAt      *uint64         `json:"expiresAt,omitempty"`
-	Owner          *common.Address `json:"owner,omitempty"`
-	CreatedAtBlock *uint64         `json:"createdAtBlock,omitempty"`
+	Key                         *common.Hash    `json:"key,omitempty"`
+	Value                       hexutil.Bytes   `json:"value,omitempty"`
+	ContentType                 *string         `json:"contentType,omitempty"`
+	ExpiresAt                   *uint64         `json:"expiresAt,omitempty"`
+	Owner                       *common.Address `json:"owner,omitempty"`
+	CreatedAtBlock              *uint64         `json:"createdAtBlock,omitempty"`
+	LastModifiedAtBlock         *uint64         `json:"lastModifiedAtBlock,omitempty"`
+	TransactionIndexInBlock     *uint64         `json:"transactionIndexInBlock,omitempty"`
+	OperationIndexInTransaction *uint64         `json:"operationIndexInTransaction,omitempty"`
 
 	StringAttributes  []Attribute[string] `json:"stringAttributes,omitempty"`
 	NumericAttributes []Attribute[uint64] `json:"numericAttributes,omitempty"`
@@ -254,6 +269,15 @@ func (h *handler) fetchEntityData(atBlockNumber uint64, addr common.Address, inc
 	}
 	if include.CreatedAtBlock {
 		ed.CreatedAtBlock = &e.CreatedAtBlock
+	}
+	if include.LastModifiedAtBlock {
+		ed.LastModifiedAtBlock = &e.LastModifiedAtBlock
+	}
+	if include.TransactionIndexInBlock {
+		ed.TransactionIndexInBlock = &e.TransactionIndexInBlock
+	}
+	if include.OperationIndexInTransaction {
+		ed.OperationIndexInTransaction = &e.OperationIndexInTransaction
 	}
 
 	// Populate user-defined annotations and/or synthetic ($-prefixed) annotations.

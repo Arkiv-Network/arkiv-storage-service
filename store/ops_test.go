@@ -7,7 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// TestBuiltinAnnotations verifies that all seven built-in annotation pairs
+// TestBuiltinAnnotations verifies that all built-in annotation pairs
 // are produced with the correct keys and encoded values.
 func TestBuiltinAnnotations(t *testing.T) {
 	creator := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
@@ -15,12 +15,13 @@ func TestBuiltinAnnotations(t *testing.T) {
 	key := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
 	e := Entity{
-		Owner:          owner,
-		Creator:        creator,
-		ExpiresAt:      1000,
-		CreatedAtBlock: 42,
-		ContentType:    "image/png",
-		Key:            key,
+		Owner:               owner,
+		Creator:             creator,
+		ExpiresAt:           1000,
+		CreatedAtBlock:      42,
+		LastModifiedAtBlock: 50,
+		ContentType:         "image/png",
+		Key:                 key,
 	}
 
 	pairs := builtinAnnotations(e)
@@ -31,13 +32,14 @@ func TestBuiltinAnnotations(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"$all":            "true",
-		"$creator":        strings.ToLower(creator.Hex()),
-		"$owner":          strings.ToLower(owner.Hex()),
-		"$key":            strings.ToLower(key.Hex()),
-		"$contentType":    "image/png",
-		"$createdAtBlock": numericVal(42),
-		"$expiration":     numericVal(1000),
+		"$all":                 "true",
+		"$creator":             strings.ToLower(creator.Hex()),
+		"$owner":               strings.ToLower(owner.Hex()),
+		"$key":                 strings.ToLower(key.Hex()),
+		"$contentType":         "image/png",
+		"$createdAtBlock":      numericVal(42),
+		"$lastModifiedAtBlock": numericVal(50),
+		"$expiration":          numericVal(1000),
 	}
 	for k, v := range want {
 		if got, ok := m[k]; !ok || got != v {

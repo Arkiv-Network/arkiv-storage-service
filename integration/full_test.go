@@ -396,12 +396,34 @@ func TestEntityLifecycle(t *testing.T) {
 	if ed.CreatedAtBlock == nil || *ed.CreatedAtBlock != 1 {
 		t.Errorf("CreatedAtBlock = %v, want 1", ed.CreatedAtBlock)
 	}
+	// LastModifiedAtBlock is included in the default IncludeData; for an
+	// entity that has only been created (never updated) it equals
+	// CreatedAtBlock.
+	if ed.LastModifiedAtBlock == nil || *ed.LastModifiedAtBlock != 1 {
+		t.Errorf("LastModifiedAtBlock = %v, want 1", ed.LastModifiedAtBlock)
+	}
+	// TransactionIndexInBlock and OperationIndexInTransaction are opt-in;
+	// the default IncludeData does not populate them.
+	if ed.TransactionIndexInBlock != nil {
+		t.Errorf("TransactionIndexInBlock = %v, want nil (not in default IncludeData)", ed.TransactionIndexInBlock)
+	}
+	if ed.OperationIndexInTransaction != nil {
+		t.Errorf("OperationIndexInTransaction = %v, want nil (not in default IncludeData)", ed.OperationIndexInTransaction)
+	}
 
 	// Block 3: update entity1 — new payload, swap annotation.
 	e.commit(t, mkBlock(3, mkUpdate(iKey1, "updated", "text/plain", strAttr("category", "archive"))))
 
-	if string(e.getEntity(t, iAddr1).Value) != "updated" {
+	updated := e.getEntity(t, iAddr1)
+	if string(updated.Value) != "updated" {
 		t.Error("entity1 payload not updated")
+	}
+	// LastModifiedAtBlock is refreshed by Update; CreatedAtBlock is preserved.
+	if updated.CreatedAtBlock == nil || *updated.CreatedAtBlock != 1 {
+		t.Errorf("after update, CreatedAtBlock = %v, want 1", updated.CreatedAtBlock)
+	}
+	if updated.LastModifiedAtBlock == nil || *updated.LastModifiedAtBlock != 3 {
+		t.Errorf("after update, LastModifiedAtBlock = %v, want 3", updated.LastModifiedAtBlock)
 	}
 	// Old annotation gone, new one present.
 	assertEmpty(t, e.doQuery(t, `category = "doc"`, nil))
@@ -412,6 +434,11 @@ func TestEntityLifecycle(t *testing.T) {
 	// Block 4: extend entity1 to expiration 3000.
 	e.commit(t, mkBlock(4, mkExtend(iKey1, 3000)))
 
+	// Extend does not refresh LastModifiedAtBlock — it stays at 3 (block of
+	// the most recent Create or Update).
+	if lm := e.getEntity(t, iAddr1).LastModifiedAtBlock; lm == nil || *lm != 3 {
+		t.Errorf("after extend, LastModifiedAtBlock = %v, want 3 (unchanged by Extend)", lm)
+	}
 	assertKeys(t, e.doQuery(t, "$expiration > 2500", nil), iKey1)
 
 	// Block 5: transfer entity2 from owner2 to owner1.
@@ -427,6 +454,75 @@ func TestEntityLifecycle(t *testing.T) {
 	e.assertEntityGone(t, iAddr1)
 	if n := e.entityCount(t); n != 1 {
 		t.Errorf("entityCount = %d, want 1", n)
+	}
+}
+
+// TestOpIndexAndTxIndexFields verifies that TransactionIndexInBlock and
+// OperationIndexInTransaction are returned through the RPC boundary when
+// explicitly requested via IncludeData, and that the ExEx-supplied tx.Index
+// is correctly threaded into each entity. Uses a multi-tx block so tx.Index
+// is non-zero for at least one entity.
+func TestOpIndexAndTxIndexFields(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Build a single block with two transactions:
+	//   tx 0 (Index=0) creates entity1 with OpIndex=2
+	//   tx 1 (Index=1) creates entity2 with OpIndex=4
+	createA := types.ArkivOperation{Create: &types.CreateOp{
+		OpIndex:     2,
+		EntityKey:   iKey1,
+		Owner:       iOwner1,
+		Payload:     hexutil.Bytes("a"),
+		ContentType: "text/plain",
+		ExpiresAt:   hexutil.Uint64(1000),
+	}}
+	createB := types.ArkivOperation{Create: &types.CreateOp{
+		OpIndex:     4,
+		EntityKey:   iKey2,
+		Owner:       iOwner2,
+		Payload:     hexutil.Bytes("b"),
+		ContentType: "text/plain",
+		ExpiresAt:   hexutil.Uint64(2000),
+	}}
+	block := types.ArkivBlock{
+		Header: types.ArkivBlockHeader{
+			Number:     hexutil.Uint64(1),
+			Hash:       bh(1),
+			ParentHash: bh(0),
+		},
+		Transactions: []types.ArkivTransaction{
+			{Index: 0, Sender: iSender, Operations: []types.ArkivOperation{createA}},
+			{Index: 1, Sender: iSender, Operations: []types.ArkivOperation{createB}},
+		},
+	}
+	e.commit(t, block)
+
+	opts := &query.Options{IncludeData: &query.IncludeData{
+		Key:                         true,
+		TransactionIndexInBlock:     true,
+		OperationIndexInTransaction: true,
+	}}
+
+	var edA query.EntityData
+	if err := e.q.Call(&edA, "arkiv_getEntityByAddress", iAddr1, opts); err != nil {
+		t.Fatalf("getEntityByAddress %s: %v", iAddr1, err)
+	}
+	if edA.TransactionIndexInBlock == nil || *edA.TransactionIndexInBlock != 0 {
+		t.Errorf("entity A TransactionIndexInBlock = %v, want 0", edA.TransactionIndexInBlock)
+	}
+	if edA.OperationIndexInTransaction == nil || *edA.OperationIndexInTransaction != 2 {
+		t.Errorf("entity A OperationIndexInTransaction = %v, want 2", edA.OperationIndexInTransaction)
+	}
+
+	var edB query.EntityData
+	if err := e.q.Call(&edB, "arkiv_getEntityByAddress", iAddr2, opts); err != nil {
+		t.Fatalf("getEntityByAddress %s: %v", iAddr2, err)
+	}
+	if edB.TransactionIndexInBlock == nil || *edB.TransactionIndexInBlock != 1 {
+		t.Errorf("entity B TransactionIndexInBlock = %v, want 1 (from tx.Index)", edB.TransactionIndexInBlock)
+	}
+	if edB.OperationIndexInTransaction == nil || *edB.OperationIndexInTransaction != 4 {
+		t.Errorf("entity B OperationIndexInTransaction = %v, want 4", edB.OperationIndexInTransaction)
 	}
 }
 

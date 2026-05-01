@@ -141,9 +141,11 @@ type CreateOp struct {
 	//   keccak256(chainId || registry || owner || nonce)
 	// The trie account address is derived as EntityKey[:20].
 	EntityKey common.Hash `json:"entityKey"`
-	// Sender is populated from ArkivTransaction.Sender by processBlock; it is
-	// not part of the wire format (the ExEx places sender at the tx level).
+	// Sender and TxIndex are populated from the enclosing ArkivTransaction by
+	// processBlock; they are not part of the wire format (the ExEx places them
+	// at the tx level, since all ops in a tx share the same values).
 	Sender        common.Address `json:"-"`
+	TxIndex       uint32         `json:"-"`
 	Owner         common.Address `json:"owner"`
 	ExpiresAt     hexutil.Uint64 `json:"expiresAt"`
 	EntityHash    common.Hash    `json:"entityHash"`

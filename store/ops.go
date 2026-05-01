@@ -18,11 +18,17 @@ type annotPair struct {
 // builtinAnnotations returns the built-in annotation pairs for an entity.
 // Address and hash values are stored as lowercase hex so that the query
 // normaliser (which lowercases $owner/$creator/$key query values) can match them.
+//
+// $txIndex/$opIndex are intentionally not bitmap-indexed: they are stored on
+// the Entity itself and returned in query responses, but their cardinality
+// (one bitmap per (block, txIndex) or (tx, opIndex) value) makes them poor
+// candidates for the inverted index.
 func builtinAnnotations(e Entity) []annotPair {
 	return []annotPair{
 		{"$all", "true"},
 		{"$creator", strings.ToLower(e.Creator.Hex())},
 		{"$createdAtBlock", numericVal(e.CreatedAtBlock)},
+		{"$lastModifiedAtBlock", numericVal(e.LastModifiedAtBlock)},
 		{"$owner", strings.ToLower(e.Owner.Hex())},
 		{"$key", strings.ToLower(e.Key.Hex())},
 		{"$expiration", numericVal(e.ExpiresAt)},
@@ -56,7 +62,9 @@ func annotPairSet(pairs []annotPair) map[annotPair]struct{} {
 	return m
 }
 
-// applyOp dispatches a single Arkiv operation to its handler.
+// applyOp dispatches a single Arkiv operation to its handler. CreateOp is
+// expected to carry its tx-level fields (Sender, TxIndex) — populated by
+// processBlock before this is called.
 func applyOp(cs *CacheStore, op types.ArkivOperation) error {
 	switch {
 	case op.Create != nil:
@@ -89,7 +97,8 @@ func (c *CacheStore) flushEntities() error {
 	return nil
 }
 
-// processCreate applies a Create operation.
+// processCreate applies a Create operation. op.Sender and op.TxIndex must
+// have been populated from the enclosing transaction by the caller.
 func processCreate(cs *CacheStore, op *types.CreateOp) error {
 	addr := common.Address(op.EntityKey[:20])
 
@@ -108,13 +117,16 @@ func processCreate(cs *CacheStore, op *types.CreateOp) error {
 
 	// 3. Build Entity and cache it; SetCode is deferred to flushEntities.
 	entity := &Entity{
-		Payload:        []byte(op.Payload),
-		Owner:          op.Owner,
-		Creator:        op.Sender,
-		ExpiresAt:      uint64(op.ExpiresAt),
-		CreatedAtBlock: cs.blockNumber,
-		ContentType:    op.ContentType,
-		Key:            op.EntityKey,
+		Payload:                     []byte(op.Payload),
+		Owner:                       op.Owner,
+		Creator:                     op.Sender,
+		ExpiresAt:                   uint64(op.ExpiresAt),
+		CreatedAtBlock:              cs.blockNumber,
+		LastModifiedAtBlock:         cs.blockNumber,
+		TransactionIndexInBlock:     uint64(op.TxIndex),
+		OperationIndexInTransaction: uint64(op.OpIndex),
+		ContentType:                 op.ContentType,
+		Key:                         op.EntityKey,
 	}
 	applyAttributes(entity, op.Attributes)
 	cs.dirtyEntities[addr] = entity
@@ -146,13 +158,16 @@ func processUpdate(cs *CacheStore, op *types.UpdateOp) error {
 	entityID := decodeUint64(idBytes)
 
 	updated := &Entity{
-		Payload:        []byte(op.Payload),
-		Owner:          old.Owner,
-		Creator:        old.Creator,
-		ExpiresAt:      old.ExpiresAt,
-		CreatedAtBlock: old.CreatedAtBlock,
-		ContentType:    op.ContentType,
-		Key:            old.Key,
+		Payload:                     []byte(op.Payload),
+		Owner:                       old.Owner,
+		Creator:                     old.Creator,
+		ExpiresAt:                   old.ExpiresAt,
+		CreatedAtBlock:              old.CreatedAtBlock,
+		LastModifiedAtBlock:         cs.blockNumber,
+		TransactionIndexInBlock:     old.TransactionIndexInBlock,
+		OperationIndexInTransaction: old.OperationIndexInTransaction,
+		ContentType:                 op.ContentType,
+		Key:                         old.Key,
 	}
 	applyAttributes(updated, op.Attributes)
 

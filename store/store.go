@@ -154,10 +154,12 @@ func (s *Store) processBlock(block types.ArkivBlock) (common.Hash, error) {
 
 	for _, tx := range block.Transactions {
 		for i, op := range tx.Operations {
-			// Sender lives at the transaction level on the wire; inject it
-			// into CreateOp so processCreate can set the entity's Creator.
+			// Sender and TxIndex live at the transaction level on the wire;
+			// inject them into CreateOp so processCreate can record the
+			// entity's Creator and the tx-position of its creation.
 			if op.Create != nil {
 				op.Create.Sender = tx.Sender
+				op.Create.TxIndex = tx.Index
 			}
 			if err := cs.ApplyOp(op); err != nil {
 				cs.Discard()

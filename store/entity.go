@@ -9,12 +9,19 @@ import (
 // Entity is the on-trie representation of an entity, stored as the code
 // field of the entity account. keccak256(RLP(entity)) is the account's codeHash.
 type Entity struct {
-	Payload            []byte
-	Owner              common.Address
-	Creator            common.Address
-	ExpiresAt          uint64
-	CreatedAtBlock     uint64
-	ContentType        string
+	Payload        []byte
+	Owner          common.Address
+	Creator        common.Address
+	ExpiresAt      uint64
+	CreatedAtBlock uint64
+	// LastModifiedAtBlock is the block number of the most recent Create or Update
+	// for this entity. Extend and Transfer do not update it.
+	LastModifiedAtBlock uint64
+	// TransactionIndexInBlock and OperationIndexInTransaction identify the Create
+	// op that brought this entity into existence; they are preserved across Updates.
+	TransactionIndexInBlock     uint64
+	OperationIndexInTransaction uint64
+	ContentType                 string
 	// Key is the contract's entityKey: keccak256(chainId || registry || owner || nonce).
 	// The trie account address is Key[:20]; the last 12 bytes are not recoverable from
 	// the address alone. Key is stored here so the query API can return it to clients,

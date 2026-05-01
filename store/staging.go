@@ -143,6 +143,8 @@ func (c *CacheStore) getEntity(addr common.Address) (*Entity, error) {
 }
 
 // ApplyOp applies a single Arkiv operation against the staged state.
+// CreateOp must have its tx-level fields (Sender, TxIndex) injected by the
+// caller; see processBlock.
 func (c *CacheStore) ApplyOp(op types.ArkivOperation) error {
 	return applyOp(c, op)
 }

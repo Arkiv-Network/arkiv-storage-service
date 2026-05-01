@@ -142,6 +142,17 @@ func TestCreateEntity(t *testing.T) {
 	if e.CreatedAtBlock != 1 {
 		t.Errorf("CreatedAtBlock = %d, want 1", e.CreatedAtBlock)
 	}
+	// On Create, LastModifiedAtBlock equals CreatedAtBlock; tx/op index reflect
+	// the creating op's position (single-tx, single-op block → both 0).
+	if e.LastModifiedAtBlock != 1 {
+		t.Errorf("LastModifiedAtBlock = %d, want 1", e.LastModifiedAtBlock)
+	}
+	if e.TransactionIndexInBlock != 0 {
+		t.Errorf("TransactionIndexInBlock = %d, want 0", e.TransactionIndexInBlock)
+	}
+	if e.OperationIndexInTransaction != 0 {
+		t.Errorf("OperationIndexInTransaction = %d, want 0", e.OperationIndexInTransaction)
+	}
 	if e.ContentType != "application/json" {
 		t.Errorf("ContentType = %q, want %q", e.ContentType, "application/json")
 	}
@@ -176,6 +187,9 @@ func TestCreateEntity(t *testing.T) {
 	}
 	if bm := readBitmap(t, s, "$contentType", "application/json"); !bm.Contains(1) {
 		t.Error("$contentType bitmap does not contain entity ID 1")
+	}
+	if bm := readBitmap(t, s, "$lastModifiedAtBlock", numericVal(1)); !bm.Contains(1) {
+		t.Error("$lastModifiedAtBlock=1 bitmap does not contain entity ID 1")
 	}
 }
 
@@ -224,6 +238,21 @@ func TestUpdateEntity(t *testing.T) {
 		t.Errorf("Creator changed to %s", e.Creator)
 	}
 
+	// CreatedAtBlock is preserved; LastModifiedAtBlock is refreshed to the
+	// update block; tx/op index identify the create event and are preserved.
+	if e.CreatedAtBlock != 1 {
+		t.Errorf("CreatedAtBlock = %d, want 1 (preserved)", e.CreatedAtBlock)
+	}
+	if e.LastModifiedAtBlock != 2 {
+		t.Errorf("LastModifiedAtBlock = %d, want 2 (refreshed by Update)", e.LastModifiedAtBlock)
+	}
+	if e.TransactionIndexInBlock != 0 {
+		t.Errorf("TransactionIndexInBlock = %d, want 0 (preserved from create)", e.TransactionIndexInBlock)
+	}
+	if e.OperationIndexInTransaction != 0 {
+		t.Errorf("OperationIndexInTransaction = %d, want 0 (preserved from create)", e.OperationIndexInTransaction)
+	}
+
 	// Removed annotation value is no longer in the bitmap.
 	if bm := readBitmap(t, s, "type", "note"); bm.Contains(1) {
 		t.Error("old type=note bitmap still contains entity ID 1")
@@ -235,6 +264,71 @@ func TestUpdateEntity(t *testing.T) {
 	// Unchanged annotation ($all) is still present.
 	if bm := readBitmap(t, s, "$all", "true"); !bm.Contains(1) {
 		t.Error("$all bitmap lost entity ID 1 after update")
+	}
+	// $lastModifiedAtBlock bitmap moves from value 1 (create block) to value 2
+	// (update block).
+	if bm := readBitmap(t, s, "$lastModifiedAtBlock", numericVal(1)); bm.Contains(1) {
+		t.Error("$lastModifiedAtBlock=1 bitmap still contains entity ID 1 after update")
+	}
+	if bm := readBitmap(t, s, "$lastModifiedAtBlock", numericVal(2)); !bm.Contains(1) {
+		t.Error("$lastModifiedAtBlock=2 bitmap does not contain entity ID 1 after update")
+	}
+}
+
+// TestCreateRecordsTxAndOpIndex verifies that processBlock injects the
+// transaction-level Index into CreateOp, and that the per-op OpIndex is
+// preserved through to the Entity. Uses a multi-tx block so tx.Index > 0
+// actually exercises the injection path (a tx-0 test would pass even if the
+// injection were silently dropped).
+func TestCreateRecordsTxAndOpIndex(t *testing.T) {
+	s := NewMemory()
+
+	createA := types.ArkivOperation{Create: &types.CreateOp{
+		OpIndex:     5,
+		EntityKey:   testKey1,
+		Owner:       testOwner1,
+		Payload:     hexutil.Bytes("a"),
+		ContentType: "text/plain",
+		ExpiresAt:   hexutil.Uint64(100),
+	}}
+	createB := types.ArkivOperation{Create: &types.CreateOp{
+		OpIndex:     7,
+		EntityKey:   testKey2,
+		Owner:       testOwner2,
+		Payload:     hexutil.Bytes("b"),
+		ContentType: "text/plain",
+		ExpiresAt:   hexutil.Uint64(200),
+	}}
+
+	block := types.ArkivBlock{
+		Header: types.ArkivBlockHeader{
+			Number:     hexutil.Uint64(1),
+			Hash:       testHash1,
+			ParentHash: common.Hash{},
+		},
+		Transactions: []types.ArkivTransaction{
+			{Index: 0, Sender: testSender, Operations: []types.ArkivOperation{createA}},
+			{Index: 3, Sender: testSender, Operations: []types.ArkivOperation{createB}},
+		},
+	}
+	if _, err := s.ProcessBlock(block); err != nil {
+		t.Fatalf("ProcessBlock: %v", err)
+	}
+
+	eA := getEntity(t, s, testAddr1)
+	if eA.TransactionIndexInBlock != 0 {
+		t.Errorf("entity A TransactionIndexInBlock = %d, want 0", eA.TransactionIndexInBlock)
+	}
+	if eA.OperationIndexInTransaction != 5 {
+		t.Errorf("entity A OperationIndexInTransaction = %d, want 5", eA.OperationIndexInTransaction)
+	}
+
+	eB := getEntity(t, s, testAddr2)
+	if eB.TransactionIndexInBlock != 3 {
+		t.Errorf("entity B TransactionIndexInBlock = %d, want 3 (from tx.Index)", eB.TransactionIndexInBlock)
+	}
+	if eB.OperationIndexInTransaction != 7 {
+		t.Errorf("entity B OperationIndexInTransaction = %d, want 7", eB.OperationIndexInTransaction)
 	}
 }
 
