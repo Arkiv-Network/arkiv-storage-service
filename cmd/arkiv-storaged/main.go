@@ -39,7 +39,7 @@ func defaultDataDir() string {
 	return filepath.Join(home, ".arkiv-storaged")
 }
 
-// loadConfig reads <dataDir>/config.json. Missing file is not an error.
+// loadConfig reads <dataDir>/config.yaml. Missing file is not an error.
 func loadConfig(dataDir string) (cfg config, err error) {
 	path := filepath.Join(dataDir, configFileName)
 	f, err := os.Open(path)

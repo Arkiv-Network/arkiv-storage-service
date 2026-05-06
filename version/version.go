@@ -17,11 +17,15 @@ var (
 )
 
 // Info describes the build running this process.
+//
+// Dirty is a *bool so we can distinguish "clean" (false) from "we have no
+// information" (omitted). VCSModified mirrors what Go's embedded VCS metadata
+// reports independently of the consolidated Dirty value.
 type Info struct {
 	Tag           string `json:"tag"`
 	Commit        string `json:"commit"`
 	CommitShort   string `json:"commitShort,omitempty"`
-	Dirty         bool   `json:"dirty"`
+	Dirty         *bool  `json:"dirty,omitempty"`
 	BuildTime     string `json:"buildTime,omitempty"`
 	GoVersion     string `json:"goVersion"`
 	ModuleVersion string `json:"moduleVersion,omitempty"`
@@ -39,12 +43,15 @@ func Current() Info {
 		BuildTime: clean(BuildTime),
 		GoVersion: runtime.Version(),
 	}
+	if dirty, ok := parseBool(Dirty); ok {
+		info.Dirty = &dirty
+	}
 
 	if buildInfo, ok := debug.ReadBuildInfo(); ok {
-		if buildInfo.Main.Version != "" && buildInfo.Main.Version != "(devel)" {
-			info.ModuleVersion = buildInfo.Main.Version
+		if v := buildInfo.Main.Version; v != "" && v != "(devel)" {
+			info.ModuleVersion = v
 			if info.Tag == unknown {
-				info.Tag = buildInfo.Main.Version
+				info.Tag = v
 			}
 		}
 
@@ -63,19 +70,16 @@ func Current() Info {
 			case "vcs.modified":
 				if modified, ok := parseBool(setting.Value); ok {
 					info.VCSModified = &modified
-					if _, dirtyKnown := parseBool(Dirty); !dirtyKnown {
-						info.Dirty = modified
+					if info.Dirty == nil {
+						info.Dirty = &modified
 					}
 				}
 			}
 		}
 	}
 
-	if dirty, ok := parseBool(Dirty); ok {
-		info.Dirty = dirty
-	}
-	if info.CommitShort = shortCommit(info.Commit); info.CommitShort == unknown {
-		info.CommitShort = ""
+	if short := shortCommit(info.Commit); short != unknown {
+		info.CommitShort = short
 	}
 	if info.BuildTime == unknown {
 		info.BuildTime = ""

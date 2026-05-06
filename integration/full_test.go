@@ -250,8 +250,8 @@ func assertVersionInfo(t *testing.T, info version.Info) {
 	if info.CommitShort != testVersionCommit[:12] {
 		t.Fatalf("commitShort = %q, want %q", info.CommitShort, testVersionCommit[:12])
 	}
-	if !info.Dirty {
-		t.Fatal("dirty = false, want true")
+	if info.Dirty == nil || !*info.Dirty {
+		t.Fatalf("dirty = %v, want true", info.Dirty)
 	}
 	if info.BuildTime != testVersionBuildTime {
 		t.Fatalf("buildTime = %q, want %q", info.BuildTime, testVersionBuildTime)

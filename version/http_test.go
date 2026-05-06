@@ -20,6 +20,12 @@ func TestHandlerServesVersion(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
 
 	var info Info
 	if err := json.NewDecoder(rec.Body).Decode(&info); err != nil {
@@ -27,6 +33,20 @@ func TestHandlerServesVersion(t *testing.T) {
 	}
 	if info.Tag != "v-test" {
 		t.Fatalf("tag = %q, want %q", info.Tag, "v-test")
+	}
+}
+
+func TestHandlerServesHeadVersion(t *testing.T) {
+	handler := Handler(http.NotFoundHandler())
+	req := httptest.NewRequest(http.MethodHead, "/version", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("HEAD body = %q, want empty", rec.Body.String())
 	}
 }
 
@@ -51,5 +71,8 @@ func TestHandlerRejectsNonGetVersionRequests(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("Allow = %q, want \"GET, HEAD\"", got)
 	}
 }
