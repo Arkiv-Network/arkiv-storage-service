@@ -26,6 +26,33 @@ make build    # writes to ./bin/arkiv-storaged
 make install  # installs to $GOPATH/bin
 ```
 
+`make build` and `make install` embed version metadata from the current git
+checkout when available:
+
+- `tag` from `git describe --tags --abbrev=0 --always`
+- `commit` from `git rev-parse HEAD`
+- `dirty` from whether the worktree has uncommitted changes
+- `buildTime` from the current UTC time
+
+For release or CI builds, the same fields can be set explicitly:
+
+```sh
+go build \
+  -ldflags "\
+    -X github.com/Arkiv-Network/arkiv-storage-service/version.Tag=v0.1.0 \
+    -X github.com/Arkiv-Network/arkiv-storage-service/version.Commit=$(git rev-parse HEAD) \
+    -X github.com/Arkiv-Network/arkiv-storage-service/version.Dirty=false \
+    -X github.com/Arkiv-Network/arkiv-storage-service/version.BuildTime=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  -o ./bin/arkiv-storaged \
+  ./cmd/arkiv-storaged
+```
+
+Print the embedded version information without starting the daemon:
+
+```sh
+arkiv-storaged --version
+```
+
 Run it:
 
 ```sh
@@ -35,6 +62,7 @@ Flags:
   -chain-addr  listen address for the chain ingest server  (default 127.0.0.1:2704)
   -query-addr  listen address for the query server         (default 127.0.0.1:2705)
   -data-dir    path to the data directory                  (default ~/.arkiv-storaged)
+  -version     print build version information and exit
 ```
 
 ### Configuration file
@@ -59,6 +87,16 @@ The service exposes two HTTP JSON-RPC 2.0 servers:
 - `arkiv_query` — SQL-like queries against latest or historical state
 - `arkiv_getEntityByAddress` — fetch a single entity by address
 - `arkiv_getEntityCount` — total number of live entities at the head
+
+Both listeners also expose a plain HTTP version endpoint:
+
+```sh
+curl http://127.0.0.1:2704/version
+curl http://127.0.0.1:2705/version
+```
+
+The response is JSON and includes the embedded tag, full commit, short commit,
+dirty flag, build time, Go version, and any available Go VCS metadata.
 
 ## Development
 

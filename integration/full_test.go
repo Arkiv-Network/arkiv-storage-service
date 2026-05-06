@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -15,12 +16,19 @@ import (
 	"github.com/Arkiv-Network/arkiv-storage-service/chain"
 	"github.com/Arkiv-Network/arkiv-storage-service/query"
 	"github.com/Arkiv-Network/arkiv-storage-service/types"
+	"github.com/Arkiv-Network/arkiv-storage-service/version"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
 var binaryPath string
+
+const (
+	testVersionTag       = "v-test"
+	testVersionCommit    = "0123456789abcdef0123456789abcdef01234567"
+	testVersionBuildTime = "2026-05-06T20:30:00Z"
+)
 
 func TestMain(m *testing.M) {
 	tmp, err := os.CreateTemp("", "arkiv-storaged-*")
@@ -31,7 +39,13 @@ func TestMain(m *testing.M) {
 	_ = tmp.Close()
 	binaryPath = tmp.Name()
 
-	build := exec.Command("go", "build", "-o", binaryPath, "../cmd/arkiv-storaged")
+	ldflags := fmt.Sprintf(
+		"-X github.com/Arkiv-Network/arkiv-storage-service/version.Tag=%s -X github.com/Arkiv-Network/arkiv-storage-service/version.Commit=%s -X github.com/Arkiv-Network/arkiv-storage-service/version.Dirty=true -X github.com/Arkiv-Network/arkiv-storage-service/version.BuildTime=%s",
+		testVersionTag,
+		testVersionCommit,
+		testVersionBuildTime,
+	)
+	build := exec.Command("go", "build", "-ldflags", ldflags, "-o", binaryPath, "../cmd/arkiv-storaged")
 	build.Stdout = os.Stderr
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
@@ -55,7 +69,6 @@ var (
 	iAddr1 = common.Address(iKey1[:20])
 	iAddr2 = common.Address(iKey2[:20])
 	iAddr3 = common.Address(iKey3[:20])
-
 
 	iOwner1 = common.HexToAddress("0xaaaa000000000000000000000000000000000001")
 	iOwner2 = common.HexToAddress("0xaaaa000000000000000000000000000000000002")
@@ -150,8 +163,10 @@ func strAttr(name, val string) types.Attribute {
 // ----- test environment -----
 
 type testEnv struct {
-	c *rpc.Client // chain client
-	q *rpc.Client // query client
+	c         *rpc.Client // chain client
+	q         *rpc.Client // query client
+	chainAddr string
+	queryAddr string
 }
 
 // freePort returns a free TCP port on localhost.
@@ -221,7 +236,60 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(queryClient.Close)
 
-	return &testEnv{c: chainClient, q: queryClient}
+	return &testEnv{c: chainClient, q: queryClient, chainAddr: chainAddr, queryAddr: queryAddr}
+}
+
+func assertVersionInfo(t *testing.T, info version.Info) {
+	t.Helper()
+	if info.Tag != testVersionTag {
+		t.Fatalf("tag = %q, want %q", info.Tag, testVersionTag)
+	}
+	if info.Commit != testVersionCommit {
+		t.Fatalf("commit = %q, want %q", info.Commit, testVersionCommit)
+	}
+	if info.CommitShort != testVersionCommit[:12] {
+		t.Fatalf("commitShort = %q, want %q", info.CommitShort, testVersionCommit[:12])
+	}
+	if !info.Dirty {
+		t.Fatal("dirty = false, want true")
+	}
+	if info.BuildTime != testVersionBuildTime {
+		t.Fatalf("buildTime = %q, want %q", info.BuildTime, testVersionBuildTime)
+	}
+	if info.GoVersion == "" {
+		t.Fatal("goVersion is empty")
+	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	out, err := exec.Command(binaryPath, "--version").Output()
+	if err != nil {
+		t.Fatalf("arkiv-storaged --version: %v", err)
+	}
+	var info version.Info
+	if err := json.Unmarshal(out, &info); err != nil {
+		t.Fatalf("decode version output: %v\n%s", err, out)
+	}
+	assertVersionInfo(t, info)
+}
+
+func TestVersionEndpoint(t *testing.T) {
+	env := newTestEnv(t)
+	for _, addr := range []string{env.chainAddr, env.queryAddr} {
+		resp, err := http.Get("http://" + addr + "/version")
+		if err != nil {
+			t.Fatalf("GET /version from %s: %v", addr, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /version from %s status = %d, want %d", addr, resp.StatusCode, http.StatusOK)
+		}
+		var info version.Info
+		if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+			t.Fatalf("decode /version from %s: %v", addr, err)
+		}
+		assertVersionInfo(t, info)
+	}
 }
 
 func (e *testEnv) commit(t *testing.T, blocks ...types.ArkivBlock) {

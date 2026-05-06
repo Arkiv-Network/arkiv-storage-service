@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/Arkiv-Network/arkiv-storage-service/chain"
 	"github.com/Arkiv-Network/arkiv-storage-service/query"
 	"github.com/Arkiv-Network/arkiv-storage-service/store"
+	"github.com/Arkiv-Network/arkiv-storage-service/version"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"gopkg.in/yaml.v2"
@@ -61,6 +63,7 @@ func main() {
 	chainAddr := flag.String("chain-addr", "127.0.0.1:2704", "address for the chain ingest JSON-RPC server (arkiv-op-reth → storaged)")
 	queryAddr := flag.String("query-addr", "127.0.0.1:2705", "address for the query JSON-RPC server (SDK → storaged)")
 	dataDir := flag.String("data-dir", defaultDataDir(), "path to the data directory (config.yaml read here; PebbleDB opened at <data-dir>/db)")
+	showVersion := flag.Bool("version", false, "print build version information and exit")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `arkiv-storaged — Arkiv entity storage daemon
@@ -78,6 +81,16 @@ Flags:
 	}
 
 	flag.Parse()
+
+	if *showVersion {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(version.Current()); err != nil {
+			fmt.Fprintf(os.Stderr, "print version: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -125,8 +138,8 @@ Flags:
 		os.Exit(1)
 	}
 
-	chainHTTP := &http.Server{Addr: *chainAddr, Handler: chainSrv}
-	queryHTTP := &http.Server{Addr: *queryAddr, Handler: querySrv}
+	chainHTTP := &http.Server{Addr: *chainAddr, Handler: version.Handler(chainSrv)}
+	queryHTTP := &http.Server{Addr: *queryAddr, Handler: version.Handler(querySrv)}
 
 	// Start both servers.
 	go func() {
