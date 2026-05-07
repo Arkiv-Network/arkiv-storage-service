@@ -280,7 +280,7 @@ func TestVersionEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /version from %s: %v", addr, err)
 		}
-		defer resp.Body.Close()
+		defer resp.Body.Close() //nolint:errcheck
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET /version from %s status = %d, want %d", addr, resp.StatusCode, http.StatusOK)
 		}
@@ -457,6 +457,9 @@ func TestEntityLifecycle(t *testing.T) {
 	}
 	if ed.Owner == nil || *ed.Owner != iOwner1 {
 		t.Errorf("Owner = %v, want %s", ed.Owner, iOwner1)
+	}
+	if ed.Creator == nil || *ed.Creator != iSender {
+		t.Errorf("Creator = %v, want %s", ed.Creator, iSender)
 	}
 	if ed.ExpiresAt == nil || *ed.ExpiresAt != 1000 {
 		t.Errorf("ExpiresAt = %v, want 1000", ed.ExpiresAt)

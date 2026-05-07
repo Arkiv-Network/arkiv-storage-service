@@ -27,6 +27,7 @@ type IncludeData struct {
 	ContentType                 bool `json:"contentType"`
 	Expiration                  bool `json:"expiration"`
 	Owner                       bool `json:"owner"`
+	Creator                     bool `json:"creator"`
 	CreatedAtBlock              bool `json:"createdAtBlock"`
 	LastModifiedAtBlock         bool `json:"lastModifiedAtBlock"`
 	TransactionIndexInBlock     bool `json:"transactionIndexInBlock"`
@@ -60,6 +61,7 @@ func (o *Options) getIncludeData() IncludeData {
 			ContentType:         true,
 			Payload:             true,
 			Owner:               true,
+			Creator:             true,
 			Attributes:          true,
 			Expiration:          true,
 			CreatedAtBlock:      true,
@@ -94,6 +96,7 @@ type EntityData struct {
 	ContentType                 *string         `json:"contentType,omitempty"`
 	ExpiresAt                   *uint64         `json:"expiresAt,omitempty"`
 	Owner                       *common.Address `json:"owner,omitempty"`
+	Creator                     *common.Address `json:"creator,omitempty"`
 	CreatedAtBlock              *uint64         `json:"createdAtBlock,omitempty"`
 	LastModifiedAtBlock         *uint64         `json:"lastModifiedAtBlock,omitempty"`
 	TransactionIndexInBlock     *uint64         `json:"transactionIndexInBlock,omitempty"`
@@ -266,6 +269,10 @@ func (h *handler) fetchEntityData(atBlockNumber uint64, addr common.Address, inc
 	if include.Owner {
 		owner := e.Owner
 		ed.Owner = &owner
+	}
+	if include.Creator {
+		creator := e.Creator
+		ed.Creator = &creator
 	}
 	if include.CreatedAtBlock {
 		ed.CreatedAtBlock = &e.CreatedAtBlock

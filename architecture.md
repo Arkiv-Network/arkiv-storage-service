@@ -124,8 +124,8 @@ SDK / clients
 │  ┌─────────────────────┐   ┌──────────────────────────────┐     │
 │  │  Chain Ingest API   │   │  Query Server                │     │
 │  │  commitChain        │   │  arkiv_query                 │     │
-│  │  revert             │   │  arkiv_getEntity             │     │
-│  │  reorg              │   │                              │     │
+│  │  revert             │   │  arkiv_getEntityByAddress    │     │
+│  │  reorg              │   │  arkiv_getEntityCount        │     │
 │  └──────────┬──────────┘   └──────────────┬───────────────┘     │
 │             │                             │                     │
 │             ▼                             ▼                     │
@@ -146,7 +146,7 @@ SDK / clients
 2. op-reth commits the sealed block. The ExEx receives a `ChainCommitted { chain }` notification.
 3. For each block, the ExEx filters to successful calls to `ENTITY_REGISTRY_ADDRESS`, reads the emitted logs to extract the typed operations (including `entityKey` for Create ops), and assembles one `ArkivBlock` per block. Blocks with no `EntityRegistry` calls are still forwarded with an empty `transactions` list.
 4. The ExEx calls `arkiv_commitChain` on the Go EntityDB. The EntityDB applies the block, computes `arkiv_stateRoot`, and returns it in the response. The ExEx does not currently submit it anywhere.
-5. Query clients call `arkiv_query` or `arkiv_getEntity` on the Go EntityDB's query server.
+5. Query clients call `arkiv_query`, `arkiv_getEntityByAddress`, or `arkiv_getEntityCount` on the Go EntityDB's query server.
 
 On `ChainReverted`, the ExEx sends `arkiv_revert` with block identifiers only. The EntityDB reverts the trie via HashScheme and repopulates mutable PebbleDB entries from the trie. On `ChainReorged`, the ExEx sends `arkiv_reorg` atomically.
 
@@ -907,35 +907,125 @@ Range and glob queries have no completeness guarantee, even in the future phase 
 
 The Go EntityDB exposes a JSON-RPC 2.0 HTTP server for query clients. This is the same endpoint used by the Arkiv SDK.
 
-**arkiv_query** — Execute a query against latest or historical state.
+Three methods are currently implemented: `arkiv_query`, `arkiv_getEntityByAddress`, and `arkiv_getEntityCount`. Verifiability endpoints (`arkiv_getEntityProof`, `arkiv_getBitmapProof`) are deferred to the future phase in which `arkiv_stateRoot` is anchored on-chain (§6).
+
+### Common types
+
+`arkiv_query` and `arkiv_getEntityByAddress` accept a shared optional `Options` object:
+
+```json
+{
+  "atBlock":        "0x...",       // block number (hex Uint64); omit or 0 for the head
+  "includeData":    { ... },       // see IncludeData below; omit for sensible defaults
+  "resultsPerPage": "0x32",        // hex Uint64; capped at 200
+  "cursor":         "0x..."        // hex-encoded ID returned in a previous response
+}
+```
+
+`atBlock` is currently restricted to the canonical head: any non-zero value is accepted but the lookup uses the head state root. Historical queries by block number are reserved for a future block-number→hash index.
+
+`IncludeData` is a per-field selector controlling which entity fields are populated in each result. The zero value `{}` returns no fields; omitting `includeData` (or passing `null`) selects a sensible default — every field below except `syntheticAttributes`, `transactionIndexInBlock`, and `operationIndexInTransaction`:
+
+```json
+{
+  "key":                         true,
+  "attributes":                  true,    // user-defined annotations
+  "syntheticAttributes":         false,   // built-in $-prefixed annotations
+  "payload":                     true,
+  "contentType":                 true,
+  "expiration":                  true,
+  "owner":                       true,
+  "creator":                     true,
+  "createdAtBlock":              true,
+  "lastModifiedAtBlock":         true,
+  "transactionIndexInBlock":     false,
+  "operationIndexInTransaction": false
+}
+```
+
+Each result is an `EntityData` object. Fields are present only when requested via `IncludeData`; `attributes`/`syntheticAttributes` populate the same `stringAttributes` and `numericAttributes` arrays.
+
+```json
+{
+  "key":                         "0x...",       // 32-byte entity key
+  "value":                       "0x...",       // payload bytes
+  "contentType":                 "image/png",
+  "expiresAt":                   1234,
+  "owner":                       "0x...",
+  "creator":                     "0x...",
+  "createdAtBlock":              100,
+  "lastModifiedAtBlock":         105,
+  "transactionIndexInBlock":     0,
+  "operationIndexInTransaction": 2,
+  "stringAttributes":            [{ "key": "category", "value": "doc" }],
+  "numericAttributes":           [{ "key": "priority", "value": 5 }]
+}
+```
+
+### arkiv_query
+
+Evaluate a query against the bitmap index and return matching entities, newest-first by internal ID.
+
+**Request** (positional params: `[query, options?]`):
 
 ```json
 {
   "method": "arkiv_query",
-  "params": [{
-    "query":        "contentType = \"image/png\" AND status = \"approved\"",
-    "atBlock":      "0xabc...",
-    "withPayload":  true,
-    "withMetadata": true,
-    "limit":        50,
-    "cursor":       null
-  }]
+  "params": [
+    "contentType = \"image/png\" && category = \"approved\"",
+    {
+      "includeData":    { "key": true, "payload": true, "owner": true },
+      "resultsPerPage": "0x32"
+    }
+  ]
 }
 ```
 
-`atBlock` is optional; if omitted, the query runs against the latest canonical head. If provided, it must be a block hash for which the EntityDB has a stored state root.
-
-**arkiv_getEntity** — Retrieve a single entity by address.
+**Response:**
 
 ```json
 {
-  "method": "arkiv_getEntity",
-  "params": [{
-    "entityAddress": "0x...",
-    "atBlock":       "0xabc..."
-  }]
+  "result": {
+    "data":        [ { "key": "0x...", "value": "0x...", "owner": "0x..." }, ... ],
+    "blockNumber": "0x3039",
+    "cursor":      "0x4f"
+  }
 }
 ```
+
+`blockNumber` is the block at which the result is reported (the head when `atBlock` is omitted). `cursor` is present only when more results remain: pass it back in the next request's `Options.cursor` to fetch the following page (the next page contains IDs strictly less than the cursor).
+
+### arkiv_getEntityByAddress
+
+Retrieve a single entity by its 20-byte trie account address (`entityKey[:20]`).
+
+**Request** (positional params: `[address, options?]`):
+
+```json
+{
+  "method": "arkiv_getEntityByAddress",
+  "params": [
+    "0x1111111111111111111111111111111111111111",
+    { "includeData": { "key": true, "payload": true, "creator": true } }
+  ]
+}
+```
+
+**Response:** a single `EntityData` object, or a JSON-RPC error if no entity exists at that address.
+
+### arkiv_getEntityCount
+
+Return the total number of live entities at the head.
+
+```json
+{ "method": "arkiv_getEntityCount", "params": [] }
+```
+
+**Response:** `{ "result": 1234 }`.
+
+### Future: proof endpoints
+
+> **Deferred.** These methods are not implemented in the current phase. They become useful once `arkiv_stateRoot` is anchored on-chain (§6); until then, clients can verify individual entity payloads via the `EntityRegistry` `coreHash` commitment (§2).
 
 **arkiv_getEntityProof** — Return the full `eth_getProof` response for an entity account at a given block. Clients use this to independently verify entity state against the L1-anchored `OutputRoot`.
 
